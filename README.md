@@ -84,6 +84,28 @@ npm run dev            # → http://localhost:3000
 > **部署后必跑 `npm run smoke`**。它能发现"页面看起来正常但实时其实不通"
 > 这类问题，并诊断中间层是否在缓冲 SSE。详见 [docs/DEPLOY.md](docs/DEPLOY.md) 第 5 节。
 
+### 推送不动的时候（github.com 直连不稳）
+
+大陆网络对 `github.com:443` 的干扰是**间歇性**的：可能前一分钟还通，
+下一分钟 `Failed to connect to github.com port 443: Timed out`，
+而同一时刻相邻的 GitHub IP（`codeload.github.com`）却是通的。
+
+先重试两次（多数情况下自己就好了）。仍然不通时，可以用**已验证可连的服务器**
+当 SOCKS 代理 —— 凭据不出本机，只有 TCP 路径绕一下：
+
+```powershell
+# 1) 起一个动态转发（保持在后台）
+ssh -N -D 1082 -i .ssh-local/bbs_deploy `
+    -o UserKnownHostsFile=.ssh-local/known_hosts -o StrictHostKeyChecking=no `
+    admin@<服务器IP>
+
+# 2) 另开一个终端，让 git 走这个代理（socks5h 里的 h = 由代理解析 DNS）
+git -c http.proxy=socks5h://127.0.0.1:1082 push origin main
+```
+
+> 不要为此把 `http.sslVerify` 关掉，也不要把仓库地址改成 IP —— 那两者都是
+> 用永久的安全损失换一次性的便利。
+
 > **`SMOKE_PASSWORD` 是必填的。** smoke 用两个长期固定账号（`smokea` / `smokeb`）
 > 模拟两个浏览器互相收发消息，它们的口令**不写在源码里**——写死等于把一把长期
 > 有效的钥匙提交进仓库。配置方式：
