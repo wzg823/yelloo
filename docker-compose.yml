@@ -157,6 +157,13 @@ services:
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
       SEED_ADMIN_HANDLE: ${SEED_ADMIN_HANDLE:-admin}
+      # ★ seed 也需要它 ★
+      #
+      # 种子数据负责创建验证脚本用的固定夹具账号（smokea / smokeb）
+      # 并把它们的 trust_level 设为 1 —— 夹具不是新用户，不该受新人限流约束。
+      # 少了这一行，seed 会报"未设置 SMOKE_PASSWORD 跳过"，夹具的
+      # trust_level 就停在 0：verify-attachments.mjs 在冷却期会直接挂掉。
+      SMOKE_PASSWORD: ${SMOKE_PASSWORD:-}
     command: ['node', 'scripts/seed.mjs']
 
   caddy:

@@ -117,6 +117,59 @@ async function main() {
       .onConflictDoNothing({ target: schema.channels.slug })
   }
 
+  // ── 验证脚本用的固定账号（必须在管理员那段之前，那段有 return）────
+  //
+  // smoke.mjs / verify-attachments.mjs / verify-newuser.mjs 都需要
+  // "能正常发帖、能传附件"的账号。它们原先各自临时注册，有两个真实副作用：
+  //
+  //   1. 每跑一次就在库里留一批垃圾账号（atchaXXXX@atch.test）
+  //   2. **与新人限流直接冲突** —— 临时账号必然处于冷却期，而冷却期
+  //      禁止附件、发言间隔 30 秒，于是验证脚本被自己的反垃圾策略拦死。
+  //      实测 verify-attachments.mjs 一次挂掉 4 项断言，原因就在这里。
+  //
+  // 所以改为在这里一次性建好，并直接把 trust_level 设为 1：
+  // 这两个是**测试夹具**，不是新用户，不该受反垃圾阶梯约束。
+  // trust_level 也正是给"人工/自动信任"准备的开关 —— 将来邮箱验证
+  // 通过后提升信任等级，走的是同一个字段。
+  const fixturePassword = process.env.SMOKE_PASSWORD
+
+  if (!fixturePassword) {
+    console.log('→ 未设置 SMOKE_PASSWORD，跳过验证用固定账号')
+  } else {
+    for (const fixture of seedData.testFixtures) {
+      const email = fixture.email.toLowerCase()
+      const found = await db
+        .select({ id: schema.users.id, trustLevel: schema.users.trustLevel })
+        .from(schema.users)
+        .where(sql`lower(${schema.users.email}) = ${email}`)
+        .limit(1)
+
+      if (found.length > 0) {
+        // 已存在：只补齐信任等级，不碰口令
+        // （改口令是 scripts/set-password.mjs 的职责，它有撤销会话的语义）
+        if (found[0].trustLevel < 1) {
+          await db
+            .update(schema.users)
+            .set({ trustLevel: 1 })
+            .where(eq(schema.users.id, found[0].id))
+          console.log(`→ 提升 ${fixture.handle} 的 trust_level 到 1（原为 ${found[0].trustLevel}）`)
+        }
+        continue
+      }
+
+      await db.insert(schema.users).values({
+        handle: fixture.handle,
+        email,
+        passwordHash: await hash(fixturePassword, ARGON2_OPTIONS),
+        displayName: fixture.displayName,
+        role: 'member',
+        trustLevel: 1,
+        emailVerifiedAt: new Date(),
+      })
+      console.log(`→ 已创建验证用账号：${fixture.handle} <${email}>（trust_level=1）`)
+    }
+  }
+
   // ── 首个管理员 ────────────────────────────────────────────────────
   // 通过环境变量提供，避免把弱口令写死在代码里。
   const adminEmail = process.env.SEED_ADMIN_EMAIL

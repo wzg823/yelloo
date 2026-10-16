@@ -64,6 +64,13 @@ export type SessionUser = {
   status: string
   mutedUntil: Date | null
   trustLevel: number
+  /**
+   * 注册时间。新人限流（src/lib/trust.ts）靠它算账号年龄。
+   *
+   * 刻意放在会话查询里一起取，而不是限流时再查一次库：
+   * 发帖是最高频的写路径，为一个已知的字段多打一次数据库往返不值得。
+   */
+  createdAt: Date
   perms: bigint
 }
 
@@ -154,6 +161,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
       status: users.status,
       mutedUntil: users.mutedUntil,
       trustLevel: users.trustLevel,
+      createdAt: users.createdAt,
     })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
@@ -199,6 +207,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     status: row.status,
     mutedUntil: row.mutedUntil,
     trustLevel: row.trustLevel,
+    createdAt: row.createdAt,
     perms,
   }
 }

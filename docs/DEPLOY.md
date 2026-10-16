@@ -478,11 +478,41 @@ SMOKE_PASSWORD=<上面生成的串>
 
 账号不存在时脚本会自动注册它们，所以首次配好直接跑即可；之后每次都是登录。
 
+> `deploy.sh` 会在迁移之后自动跑一次 `db:seed`（幂等），它会创建这两个夹具
+> 账号并把它们的 `trust_level` 设为 **1**。这一步很关键：夹具不是新用户，
+> 不该被新人限流约束 —— 少这一步，`verify-attachments.mjs` 在账号未满
+> 10 分钟时会因"冷却期禁止附件"整片失败，看起来像附件功能坏了。
+
 > 改口令用 `scripts/set-password.mjs`（会同时撤销该用户的所有会话）：
 >
 > ```bash
 > docker compose exec -T app sh -c 'NEW_PASSWORD="$SMOKE_PASSWORD" node scripts/set-password.mjs smokea'
 > ```
+
+### 另外两个验证脚本
+
+```bash
+# 新人限流策略单元测试：注入假时钟，穷举 10 分钟 / 24 小时边界与配额
+# 不碰数据库、不发网络请求，毫秒级完成
+docker compose exec -T app node scripts/test-trust.mjs
+# 本机也行：
+npm run test:trust
+
+# 新人限流端到端：注册一个真新账号，验证第 2 条被拒、冷却期禁附件，
+# 然后等过间隔证明"是延迟而非封禁"（约 35 秒，含 31 秒等待）
+docker compose exec -T app node scripts/verify-newuser.mjs
+
+# 附件链路：写入 → 卷 → Caddy 直出 的完整闭环，含魔法数字与响应头
+docker compose exec -T app sh -c 'CADDY_URL=http://caddy node scripts/verify-attachments.mjs'
+```
+
+> **注册限流预算**：注册接口限流为 5 次/小时/IP。
+> `verify-newuser.mjs` 每次运行注册 1 个新账号（新人限流只能对真新账号生效，
+> 绕不开），`verify-attachments.mjs` 现在**不再注册**（改用夹具账号登录）。
+> 所以一小时跑两轮完整验证是安全的。
+>
+> 验证会留下垃圾数据：`nu*@newuser.test` 账号与若干测试消息。
+> 上线前需清理（连同演示账号 alice / bob / carol 一起）。
 
 ### 如何解读输出
 

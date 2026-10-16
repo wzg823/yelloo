@@ -62,5 +62,17 @@
       "topic": "功能建议与问题反馈",
       "position": 10
     }
+  ],
+  "testFixtures": [
+    {
+      "handle": "smokea",
+      "email": "smoke-a@smoke.test",
+      "displayName": "冒烟测试 A"
+    },
+    {
+      "handle": "smokeb",
+      "email": "smoke-b@smoke.test",
+      "displayName": "冒烟测试 B"
+    }
   ]
 }

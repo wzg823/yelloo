@@ -30,6 +30,22 @@ const HEARTBEAT_WAIT_MS = Number(process.env.SMOKE_HEARTBEAT_WAIT_MS ?? 40000)
 const results = []
 let warnings = 0
 
+/**
+ * 当前 SSE 客户端的引用 —— 模块级，让 `finish()` 也能关掉它。
+ *
+ * ★ 为什么必须这么做 ★
+ *
+ * 这个脚本刻意不用 `process.exit()`（原因见 `finish()` 的说明），
+ * 于是**只要 SSE 流还开着，事件循环就永远不空，进程永不退出** ——
+ * 表现为"打印完结果摘要后卡死"。
+ *
+ * 成功路径在 main() 末尾会 `sse.abort()`，所以看起来一切正常；
+ * 但**任何提前失败**（比如第 5 步发消息被拒）都会直接 `return finish()`，
+ * 根本走不到那行 abort。第一次实测就是这个现象：连跑 8 分钟不退出，
+ * 而 `deploy.sh --smoke` 会因此永久挂住。
+ */
+let activeSse = null
+
 function record(name, ok, detail, warn = false) {
   results.push({ name, ok, detail, warn })
   if (!ok && warn) warnings += 1
@@ -362,6 +378,8 @@ async function main() {
     `${BASE}/api/events?since=${encodeURIComponent(bootstrapCursor)}`,
     alice.cookie,
   )
+  // 登记给 finish()，保证提前失败时也会被关闭（见 activeSse 的说明）
+  activeSse = sse
 
   sse.onComment((raw) => {
     heartbeatCount += 1
@@ -440,12 +458,39 @@ async function main() {
 
   try {
     sentAt = Date.now()
-    const res = await tfetch(`${BASE}/api/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: bob.cookie },
-      body: JSON.stringify({ channel_id: channel.id, content }),
-    })
-    const body = await parseJson(res)
+    const post = (cookie) =>
+      tfetch(`${BASE}/api/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ channel_id: channel.id, content }),
+      })
+
+    let res = await post(bob.cookie)
+    let body = await parseJson(res)
+
+    // ★ 新人门卡可能拦下**测试账号自己** ★
+    //
+    // smokea / smokeb 是固定账号，但"固定"不等于"老"：全新部署之后第一次
+    // 运行 smoke 时它们刚被创建，同样落在冷却期（30 秒间隔）/爬坡期（10 秒间隔）。
+    // 表现就是"连续跑两次 smoke，第二次神秘失败"。
+    //
+    // 那不是缺陷 —— 反垃圾门卡由 scripts/verify-newuser.mjs 专门验证，
+    // smoke 的职责是实时链路。所以这里按服务端给的等待时间重试一次，
+    // 并明确打印原因，避免把预期行为当成故障去排查。
+    if (res.status === 429 && body?.code === 'new_user_limited') {
+      const waitMs = Math.min(
+        Number(res.headers.get('retry-after') ?? 30) * 1000 + 500,
+        35_000,
+      )
+      console.log(
+        `\x1b[33m  !\x1b[0m 测试账号自身被新人限流拦住，等待 ${Math.round(waitMs / 1000)}s 后重试` +
+          `\x1b[2m（预期行为：账号未满 24 小时；门卡本身由 verify-newuser.mjs 验证）\x1b[0m`,
+      )
+      await new Promise((r) => setTimeout(r, waitMs))
+      sentAt = Date.now()
+      res = await post(bob.cookie)
+      body = await parseJson(res)
+    }
 
     if (res.status !== 201) {
       record('B 发送消息', false, `HTTP ${res.status}：${body?.error ?? '未知错误'}`)
@@ -629,20 +674,41 @@ function finish() {
       ' 频道写入测试消息，可在管理后台或数据库清理。\x1b[0m',
   )
 
-  // ★ 同样不用 process.exit() ★
+  // ★ 先关 SSE，再设退出码 ★
   //
-  // 早期失败的路径（比如第 2 步拿到频道列表之前就出错）根本没走到 sse.abort()，
-  // 此时 undici 仍握着 keep-alive 连接。在 Windows 上 process.exit() 会触发
+  // 顺序很关键。这个脚本不用 process.exit()：在 Windows 上，undici 还握着
+  // keep-alive 连接时调 process.exit() 会触发 libuv 断言
   //     Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c
-  // 进程以 0xC0000409 崩溃 —— 于是"有 3 项失败(退出码 1)"变成了"程序崩溃"，
-  // 正好把最有用的信息（哪几项失败）盖掉。
+  // 进程以 0xC0000409 崩溃，于是"有 N 项失败(退出码 1)"被伪装成"程序崩溃"，
+  // 正好把最有用的信息盖掉。
   //
-  // 设 exitCode 后返回，交给事件循环排空：undici 的 keep-alive 连接
-  // 默认 4 秒后自行关闭，实测退出耗时 1~2 秒，可接受。
+  // 但**不调 process.exit() 就意味着必须自己把句柄关干净**：
+  // SSE 是唯一的常驻连接，只要它还开着，事件循环就永远不空，进程永不退出。
+  // 提前失败的路径走不到 main() 末尾的 abort()，所以这里必须兜底。
+  try {
+    activeSse?.abort?.()
+  } catch {
+    /* 已经关掉了 */
+  }
+
+  // 兜底：万一将来又引入什么常驻句柄，最多等 5 秒就强退。
+  // unref() 让它自己不阻止退出 —— 正常路径毫秒级结束，异常路径被这 5 秒封顶。
+  // 宁可退出码带一点噪音，也不能让 `deploy.sh --smoke` 永久挂住。
+  const forceExit = setTimeout(() => process.exit(failed.length > 0 ? 1 : 0), 5000)
+  forceExit.unref?.()
+
   process.exitCode = failed.length > 0 ? 1 : 0
 }
 
 main().catch((err) => {
   console.error('\n\x1b[31m脚本异常终止：\x1b[0m', err)
-  process.exit(1)
+  // 与 finish() 同样的两条：关掉 SSE，再设退出码（不用 process.exit()）
+  try {
+    activeSse?.abort?.()
+  } catch {
+    /* 已经关掉了 */
+  }
+  const forceExit = setTimeout(() => process.exit(1), 5000)
+  forceExit.unref?.()
+  process.exitCode = 1
 })

@@ -65,6 +65,7 @@ npm run dev            # → http://localhost:3000
 | `npm run start` | 启动生产服务 |
 | `npm run typecheck` | TypeScript 检查（CI 必跑） |
 | `npm run smoke` | **端到端验证**：注册 → 发消息 → 跨用户实时投递 + 心跳检测（需 `SMOKE_PASSWORD`，见下） |
+| `npm run test:trust` | **新人限流策略单元测试**：注入假时钟穷举 10 分钟 / 24 小时边界、配额、员工豁免（不需要数据库） |
 | `npm run build:image` | **在 WSL 里构建镜像并导出**（低内存服务器的正确做法） |
 | `npm run deploy` | 部署到服务器（**在服务器上执行**，见 [docs/DEPLOY.md](docs/DEPLOY.md) 第 4 节） |
 | `npm run deploy:local -- -Server root@IP` | 从 Windows 本地编排部署（打包上传 + 远程部署 + 验证） |
@@ -227,8 +228,7 @@ src/
 
 - 消息编辑 / 删除未实现：软删除字段已在表里，客户端也已支持 `message.deleted` 事件（P2）
 - 举报、封禁、审计日志只有表与工具函数，没有管理界面（P2）
-- `users.trust_level` 已写入但未被读取，新人限流尚未生效（P2）
 - forum 类型频道目前与 text 频道行为一致，未做"一帖一帖"的独立 URL（P3）
 - 评论/反应（reactions）只有表结构（P3）
-- 无邮件发送：注册不做邮箱验证，忘记密码流程未实现（P2）
+- 无邮件发送：注册不做邮箱验证，忘记密码流程未实现（P2；运维可用 `scripts/set-password.mjs` 手动重置）
 - 无速率限制的分布式实现：当前是进程内滑动窗口，多实例下额度会乘以实例数（P4）

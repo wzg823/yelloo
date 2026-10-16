@@ -49,33 +49,66 @@ function tinyPng() {
   )
 }
 
+/**
+ * 被新人限流拦住时给一句能直接照做的提示。
+ *
+ * 这个失败最常见的原因不是附件链路坏了，而是夹具账号的 trust_level 被重置回 0
+ * （或建库时没跑 seed）。没有这句提示的话，看到的是"HTTP 429：注册后 10 分钟内
+ * 不能上传附件"，很容易误判成功能缺陷。
+ */
+function gateHint(body) {
+  if (body?.code === 'new_user_blocked' || body?.code === 'new_user_limited') {
+    return ' —— 夹具账号的 trust_level 不是 1，执行 npm run db:seed 修正（幂等）'
+  }
+  return ''
+}
+
 async function main() {
   const stamp = Date.now().toString(36)
   console.log(`\x1b[1m附件链路验证\x1b[0m  BASE=${BASE}`)
 
-  // ── 准备账号 ──────────────────────────────────────────────────────
+  // ── 使用固定夹具账号登录（不再临时注册）──────────────────────────
   //
-  // 这里的口令是**写死的，但它不是凭据**：账号名带时间戳后缀（atcha<stamp>），
-  // 每次运行都是全新的一次性账号，事后不再登录。所以知道这个字符串并不能
-  // 登录任何长期存在的账号 —— 与 smoke.mjs 里那两个固定账号性质完全不同
-  // （那两个的口令因此必须由 SMOKE_PASSWORD 环境变量提供）。
+  // 原先每次运行注册两个带时间戳的临时账号，有两个真实代价：
+  //   1. 每跑一次就在库里留 2 个垃圾账号，需要人工清理
+  //   2. **与新人限流冲突**：临时账号必然处于冷却期，而冷却期禁止附件，
+  //      于是本脚本被自己的反垃圾策略拦死（实测一次挂 4 项断言）
   //
-  // 代价：每跑一次就在库里留 2 个垃圾账号。上线前需要清理 atch*@atch.test。
-  const mkUser = async (tag) => {
-    const handle = `atch${tag}${stamp}`.slice(0, 32)
-    const res = await fetch(`${BASE}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handle, email: `${handle}@atch.test`, password: 'AttachTest!2026' }),
-    })
-    const cookie = getCookie(res)
-    if (res.status !== 201 || !cookie) throw new Error(`注册 ${handle} 失败：HTTP ${res.status}`)
-    return { handle, cookie }
+  // 现在改为登录 `db:seed` 建好的夹具账号，它们的 trust_level=1，
+  // 不受新人阶梯约束。口令来自 SMOKE_PASSWORD，与 smoke.mjs 共用。
+  const fixturePassword = process.env.SMOKE_PASSWORD
+  if (!fixturePassword) {
+    console.error(
+      '\n\x1b[31m✗ 缺少环境变量 SMOKE_PASSWORD\x1b[0m\n\n' +
+        '  本脚本用 db:seed 建好的固定夹具账号（smokea / smokeb）登录。\n' +
+        '  容器内运行：写在服务器 .env，compose 会自动注入\n' +
+        '  夹具不存在时先执行：npm run db:seed（幂等）\n',
+    )
+    // 与 smoke.mjs 一致：用 exitCode 而不是 process.exit()，见该文件的说明
+    process.exitCode = 2
+    return
   }
 
-  const alice = await mkUser('a')
-  const bob = await mkUser('b')
-  record('准备两个测试账号', true, `${alice.handle} / ${bob.handle}`)
+  const loginFixture = async (email) => {
+    const res = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: fixturePassword }),
+    })
+    const cookie = getCookie(res)
+    if (!cookie) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(
+        `登录 ${email} 失败：HTTP ${res.status}${body?.error ? `：${body.error}` : ''}` +
+          '（夹具不存在或口令不符时执行 npm run db:seed）',
+      )
+    }
+    return { email, cookie }
+  }
+
+  const alice = await loginFixture('smoke-a@smoke.test')
+  const bob = await loginFixture('smoke-b@smoke.test')
+  record('登录测试夹具账号', true, 'smokea / smokeb（trust_level=1，不受新人限流）')
 
   const channelsRes = await fetch(`${BASE}/api/channels`)
   const { channels } = await channelsRes.json()
@@ -89,7 +122,11 @@ async function main() {
   })
   const msgBody = await msgRes.json()
   if (msgRes.status !== 201) {
-    record('创建消息', false, `HTTP ${msgRes.status}：${msgBody?.error ?? ''}`)
+    record(
+      '创建消息',
+      false,
+      `HTTP ${msgRes.status}：${msgBody?.error ?? ''}` + gateHint(msgBody),
+    )
     return finish()
   }
   const messageId = String(msgBody.message.id)

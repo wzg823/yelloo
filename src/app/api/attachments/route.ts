@@ -8,7 +8,11 @@
  * 对"贴一张截图/一段日志"这个场景，这个折中完全够用。
  *
  * ── 校验顺序（从便宜到昂贵，且先鉴权后落盘）────────────────────────
- *   登录 → 频率限制 → 消息存在且属于自己 → 类型白名单 → 大小上限 → 写盘 → 记账
+ *   登录 → 新人门卡 → 基础频率限制 → 消息存在且属于自己 → 类型白名单
+ *   → 大小上限 → 写盘 → 记账
+ *
+ * 新人门卡必须在**解析 multipart 之前**：冷却期禁止附件时，
+ * 没有任何理由先把几 MB 的请求体读进内存再拒绝。
  */
 import type { NextRequest } from 'next/server'
 import { eq, inArray, sql } from 'drizzle-orm'
@@ -17,6 +21,7 @@ import { attachments, messages } from '@/db/schema'
 import { AUDIT, audit } from '@/lib/audit'
 import { PERM, hasPerm } from '@/lib/permissions'
 import { RATE_RULES, clientIp, consume } from '@/lib/ratelimit'
+import { evaluateGate } from '@/lib/trust'
 import { deliver } from '@/lib/realtime/hub'
 import { errorResponse, jsonResponse } from '@/lib/serialize'
 import { getCurrentUser, isMuted } from '@/lib/session'
@@ -47,6 +52,25 @@ export async function POST(req: NextRequest) {
   }
   if (isMuted(user)) {
     return errorResponse(403, '禁言期间不能上传附件', 'muted')
+  }
+
+  // 新人门卡。放在 maxUploadBytes() / formData() 之前，见文件头说明。
+  const gate = evaluateGate({
+    action: 'upload',
+    userId: user.id,
+    trustLevel: user.trustLevel,
+    createdAt: user.createdAt,
+    isStaff: hasPerm(user.perms, PERM.MANAGE_MESSAGE),
+    consume,
+  })
+  if (!gate.ok) {
+    return jsonResponse(
+      { error: gate.error, code: gate.code },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil(gate.retryAfterMs / 1000)) },
+      },
+    )
   }
 
   const ip = clientIp(req.headers)

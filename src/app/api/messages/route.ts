@@ -2,7 +2,11 @@
  * 发送消息。
  *
  * 校验顺序刻意如此（从便宜到昂贵，且先鉴权后落库）：
- *   1. 登录   2. 权限   3. 禁言   4. 限流   5. 内容   6. 写库   7. 广播
+ *   1. 登录   2. 权限   3. 禁言   4. 新人门卡   5. 基础限流   6. 内容   7. 写库   8. 广播
+ *
+ * 新人门卡排在基础限流**之前**：新人额度更小、提示也更具体
+ * （"新账号有 30 秒发言间隔，请 24 秒后重试" 而不是 "发送过于频繁"）。
+ * 反过来先撞基础限流的话，用户只会看到一句无信息量的拒绝。
  *
  * 广播放在写库成功之后。若广播失败，消息仍在库里（用户刷新可见），
  * 这比"广播成功但没入库"要好得多——后者会造成"看到过但找不回"的幽灵消息。
@@ -15,6 +19,7 @@ import { errorResponse, jsonResponse } from '@/lib/serialize'
 import { getCurrentUser, isMuted } from '@/lib/session'
 import { PERM, hasPerm } from '@/lib/permissions'
 import { RATE_RULES, clientIp, consume } from '@/lib/ratelimit'
+import { evaluateGate } from '@/lib/trust'
 import { nextId } from '@/lib/snowflake'
 import { audit, AUDIT } from '@/lib/audit'
 
@@ -34,6 +39,26 @@ export async function POST(req: NextRequest) {
   if (isMuted(user)) {
     const until = user.mutedUntil ? `，解禁时间 ${user.mutedUntil.toISOString()}` : ''
     return errorResponse(403, `你当前处于禁言状态${until}`, 'muted')
+  }
+
+  // 新人限流：按账号年龄分级。员工不受约束 —— 刚被授予版主权限的账号
+  // 不该先等 30 秒才能发第一条消息。
+  const gate = evaluateGate({
+    action: 'postMessage',
+    userId: user.id,
+    trustLevel: user.trustLevel,
+    createdAt: user.createdAt,
+    isStaff: hasPerm(user.perms, PERM.MANAGE_MESSAGE),
+    consume,
+  })
+  if (!gate.ok) {
+    return jsonResponse(
+      { error: gate.error, code: gate.code },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil(gate.retryAfterMs / 1000)) },
+      },
+    )
   }
 
   const ip = clientIp(req.headers)
