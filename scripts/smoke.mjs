@@ -265,7 +265,16 @@ async function main() {
         '  容器内运行：  写在服务器 .env 的 SMOKE_PASSWORD，compose 会自动注入\n' +
         '  两个账号还不存在时：设好 .env 后直接跑，脚本会自动注册它们\n',
     )
-    process.exit(2)
+    // ★ 用 exitCode + return，不用 process.exit() ★
+    //
+    // 在 Windows 上，此时 undici 还握着前几个请求留下的 keep-alive 连接，
+    // 直接 process.exit() 会在 libuv 里触发断言：
+    //     Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
+    //     file src\win\async.c, line 76
+    // 进程以 0xC0000409 崩溃退出，于是"配置错误(2)"被伪装成"程序崩溃"。
+    // 设 exitCode 后正常返回，事件循环会在 keep-alive 超时后排空并干净退出。
+    process.exitCode = 2
+    return
   }
 
   /** 返回 cookie 或 null */
@@ -364,13 +373,29 @@ async function main() {
     if (data?.message) received.push({ at: Date.now(), id, message: data.message })
   })
 
-  sse.on('resync', ({ data }) => {
+  sse.on('resync', ({ id, data }) => {
     if (data?.reason === 'ready') {
-      serverCursor = data.cursor
+      // ★ 游标在 SSE 的 `id:` 行上，不在 payload 里 ★
+      //
+      // formatSse() 把 cursor 放在信封层（`id: <cursor>`），payload 只有
+      // { reason, channels, heartbeat_ms, stats }。早期版本读的是 data.cursor，
+      // 于是这里恒为 undefined —— 而下面的守卫写的是 `=== null`，
+      // `undefined === null` 为 false，所以"10 秒内未收到握手"这条断言
+      // 从来没生效过，测试一直显示通过。现在两处都修正。
+      serverCursor = typeof id === 'string' && id.length > 0 ? id : null
+
+      const cursorOk = serverCursor !== null && /^\d+$/.test(serverCursor)
       record(
         'SSE 握手完成',
         true,
-        `可见频道 ${data.channels} 个，服务端游标 ${String(data.cursor).slice(-8)}`,
+        `可见频道 ${data.channels} 个，心跳 ${data.heartbeat_ms}ms`,
+      )
+      // 游标是 Last-Event-ID 断线补齐的起点：缺失或格式不对，
+      // 重连时会静默丢消息（表现为"偶尔少几条"，极难复现）
+      record(
+        'SSE 握手携带游标',
+        cursorOk,
+        cursorOk ? `游标 ${serverCursor}` : `游标缺失或非纯数字：${JSON.stringify(serverCursor)}`,
       )
     } else {
       record(`服务端要求 resync（${data?.reason}）`, false, '背压或补齐失败', true)
@@ -383,14 +408,16 @@ async function main() {
       sse.ready().then(() => undefined),
       (async () => {
         // 给一个宽松的握手窗口
-        for (let i = 0; i < 100 && serverCursor === null; i += 1) {
+        // 用 `!serverCursor` 而不是 `=== null`：游标可能是 undefined/null/''，
+        // 三者都意味着没拿到，`=== null` 只覆盖其中一种
+        for (let i = 0; i < 100 && !serverCursor; i += 1) {
           await new Promise((r) => setTimeout(r, 100))
         }
       })(),
     ])
 
-    if (serverCursor === null) {
-      record('SSE 握手完成', false, '10 秒内未收到 ready 事件')
+    if (!serverCursor) {
+      record('SSE 握手完成', false, '10 秒内未收到携带游标的 ready 事件')
     }
   } catch (err) {
     record('SSE 连接', false, err.message)
@@ -602,7 +629,17 @@ function finish() {
       ' 频道写入测试消息，可在管理后台或数据库清理。\x1b[0m',
   )
 
-  process.exit(failed.length > 0 ? 1 : 0)
+  // ★ 同样不用 process.exit() ★
+  //
+  // 早期失败的路径（比如第 2 步拿到频道列表之前就出错）根本没走到 sse.abort()，
+  // 此时 undici 仍握着 keep-alive 连接。在 Windows 上 process.exit() 会触发
+  //     Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c
+  // 进程以 0xC0000409 崩溃 —— 于是"有 3 项失败(退出码 1)"变成了"程序崩溃"，
+  // 正好把最有用的信息（哪几项失败）盖掉。
+  //
+  // 设 exitCode 后返回，交给事件循环排空：undici 的 keep-alive 连接
+  // 默认 4 秒后自行关闭，实测退出耗时 1~2 秒，可接受。
+  process.exitCode = failed.length > 0 ? 1 : 0
 }
 
 main().catch((err) => {

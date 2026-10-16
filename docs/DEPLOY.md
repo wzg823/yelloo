@@ -323,12 +323,42 @@ docker compose run --rm seed
 npm run deploy:local -- -Server root@1.2.3.4
 npm run deploy:local -- -Server root@1.2.3.4 -Smoke
 npm run deploy:local -- -Server root@1.2.3.4 -CheckEnv   # 只体检，不改动
+
+# 低内存服务器：本地构建镜像 → 上传 → 服务器零构建
+npm run build:image
+npm run deploy:local -- -Server root@1.2.3.4 -Images -Smoke
 ```
 
 它会：本地前置检查 → 远程体检（内存/swap/fd 上限/Docker/.env，并给出告警）→
 tar 打包上传 → 远程执行 `deploy.sh` → 返回退出码。
 
-> 该脚本是**纯 ASCII**的。原因：Windows PowerShell 5.1 会用系统 ANSI 代码页
+#### SSH 身份与主机密钥
+
+脚本默认使用项目内的 `.ssh-local/bbs_deploy` 与 `.ssh-local/known_hosts`
+（均在 `.gitignore` 中），因此**新机器不需要任何手工 ssh 配置**即可部署。
+
+> 早期版本调用的是裸 `ssh`，即依赖操作者自己有 `~/.ssh/config` 和已填充的
+> `known_hosts`。在干净的 Windows 上这不成立，而报错极具误导性：
+>
+> ```
+> ssh.exe : Host key verification failed.
+> ```
+>
+> 这句话完全没提"脚本从未告诉 ssh 用哪把钥匙"。而且裸 ssh 会回落到密码认证，
+> 而 `BatchMode=yes` 又禁止了交互输入，最终表现为一个无法解释的连接失败。
+
+可用参数覆盖：
+
+```powershell
+-Key <私钥路径>            # 换一把部署密钥
+-KnownHosts <文件路径>     # 换一个 known_hosts
+-Insecure                  # 完全跳过主机密钥校验（仅限一次性验证机）
+```
+
+默认是 `StrictHostKeyChecking=accept-new`：首次连接记录主机密钥，
+**但主机密钥一旦变化就立刻失败**（那正是中间人攻击的样子）。
+
+> ⚠️ `deploy.ps1` 是**纯 ASCII**的。原因：Windows PowerShell 5.1 会用系统 ANSI 代码页
 > （中文系统为 GBK/936）解码没有 UTF-8 BOM 的 `.ps1`，
 > 写中文会变成乱码。人读的说明一律放在本文件里。
 
@@ -418,19 +448,46 @@ curl -s http://127.0.0.1:3000/api/channels | head -30
 4. **心跳是否按时到达** ← 判断是否有中间层在缓冲 SSE
 
 ```bash
-# 在服务器上跑（默认连 http://127.0.0.1:3000）
-cd /opt/bbs && npm run smoke
+# 容器内跑（推荐：默认连 http://127.0.0.1:3000，且自动带上 .env 里的口令）
+cd /opt/bbs && docker compose exec -T app node scripts/smoke.mjs
 
-# 指定站点地址
+# 或经 deploy.sh（等价，只是多包一层输出）
+./scripts/deploy.sh --no-pull --no-build --smoke
+
+# 指定站点地址（验证对外域名，含 Caddy 的 SSE 配置）
 BASE_URL=https://bbs.example.com node scripts/smoke.mjs
 ```
 
 脚本只依赖 Node 内置能力（`fetch` / `crypto`），不需要安装任何依赖。
 
+### 必须先设置 `SMOKE_PASSWORD`
+
+脚本用两个**长期固定的账号**（`smokea` / `smokeb`）模拟两个浏览器互相收发消息。
+它们的口令**不写在源码里**：写死等于把一把长期有效的钥匙提交进版本库，
+仓库转公开或加协作者时就泄露了。放在服务器 `.env` 里，由 compose 注入容器：
+
+```bash
+# 生成一个随机口令（不要复用 SESSION_SECRET）
+node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+# 写进 /opt/bbs/.env
+SMOKE_PASSWORD=<上面生成的串>
+```
+
+未配置时脚本以退出码 **2** 报配置错误（而不是回退到某个默认口令，也不是静默跳过）。
+退出码 **1** 才表示"站点有项目失败"，两者刻意区分开。
+
+账号不存在时脚本会自动注册它们，所以首次配好直接跑即可；之后每次都是登录。
+
+> 改口令用 `scripts/set-password.mjs`（会同时撤销该用户的所有会话）：
+>
+> ```bash
+> docker compose exec -T app sh -c 'NEW_PASSWORD="$SMOKE_PASSWORD" node scripts/set-password.mjs smokea'
+> ```
+
 ### 如何解读输出
 
 ```
-结果  通过 18  失败 0  警告 1
+结果  通过 22  失败 0  警告 1
 ```
 
 | 现象 | 含义 | 处置 |
@@ -512,8 +569,8 @@ docker compose run --rm migrate
 # 4) 启动全部服务
 docker compose up -d
 
-# 5) 验证
-BASE_URL=https://你的域名 node scripts/smoke.mjs
+# 5) 验证（容器内跑；宿主上没有 node，app 端口也没映射到宿主）
+docker compose exec -T app node scripts/smoke.mjs
 ```
 
 > **为什么先 migrate 再 restore**：备份里已含 Drizzle 的迁移记录表。

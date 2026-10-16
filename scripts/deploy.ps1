@@ -48,7 +48,32 @@ param(
     [switch]$Images,
 
     # Only probe connectivity and environment; change nothing
-    [switch]$CheckEnv
+    [switch]$CheckEnv,
+
+    # SSH identity + known_hosts.
+    #
+    # WHY THESE ARE PARAMETERS WITH PROJECT-LOCAL DEFAULTS
+    #   This script originally called bare `ssh`/`scp`, i.e. it relied on the
+    #   operator having a ~/.ssh/config and a populated ~/.ssh/known_hosts.
+    #   On a clean Windows box that is simply false, and the failure was
+    #   misleading:
+    #
+    #       ssh.exe : Host key verification failed.
+    #
+    #   Nothing in that message says "this script never told ssh which key to
+    #   use". Bare ssh also falls back to password auth, which BatchMode
+    #   disables, so the real symptom is an unexplained connection failure.
+    #
+    #   The project already keeps its deploy key in .ssh-local/ (gitignored).
+    #   Pointing ssh at exactly those two files makes a fresh machine work with
+    #   zero manual setup, and keeps the deploy key separate from personal keys.
+    [string]$Key = '',
+
+    [string]$KnownHosts = '',
+
+    # Skip host key verification entirely. Only legitimate for a throwaway box;
+    # with accept-new (the default) a CHANGED host key still fails loudly.
+    [switch]$Insecure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,6 +101,31 @@ if (-not (Test-Path (Join-Path $ProjectRoot 'docker-compose.yml'))) {
 }
 Write-Ok 'ssh / scp / tar available'
 
+# --- 0b. SSH identity / host key --------------------------------------------
+# Resolved once here and splatted into every ssh/scp call below, so the six
+# call sites cannot drift apart (one of them silently using a different key
+# is exactly the kind of bug that only shows up on someone else's machine).
+if (-not $Key)        { $Key        = Join-Path $ProjectRoot '.ssh-local\bbs_deploy' }
+if (-not $KnownHosts) { $KnownHosts = Join-Path $ProjectRoot '.ssh-local\known_hosts' }
+
+$SshBase = @()
+if (Test-Path $Key) {
+    $SshBase += @('-i', $Key)
+    Write-Ok "identity  $Key"
+} else {
+    Write-Note "deploy key not found at $Key -> falling back to your default ssh identity"
+    Write-Note "generate one with: ssh-keygen -t ed25519 -f `"$Key`" -N `"`""
+}
+if ($Insecure) {
+    Write-Note 'host key verification DISABLED (-Insecure)'
+    $SshBase += @('-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=NUL')
+} else {
+    # accept-new: trust the host on first contact, but still refuse LOUDLY if a
+    # known host key ever changes (that is what a MITM looks like).
+    $SshBase += @('-o', "UserKnownHostsFile=$KnownHosts", '-o', 'StrictHostKeyChecking=accept-new')
+    Write-Ok "known_hosts $KnownHosts"
+}
+
 # --- 1. Remote probe --------------------------------------------------------
 Write-Step "Probing $Server"
 
@@ -102,7 +152,7 @@ if command -v node >/dev/null 2>&1; then echo "NODE=$(node -v)"; else echo "NODE
 '@
 $probe = $probeTemplate -replace '__REMOTE_PATH__', $RemotePath
 
-$info = & ssh -o ConnectTimeout=10 -o BatchMode=yes $Server $probe 2>&1
+$info = & ssh @SshBase -o ConnectTimeout=10 -o BatchMode=yes $Server $probe 2>&1
 if ($LASTEXITCODE -ne 0) {
     $info | ForEach-Object { Write-Host $_ }
     Fail @"
@@ -220,14 +270,14 @@ if (-not $NoSync) {
     $sizeMB = [math]::Round((Get-Item $tarball).Length / 1MB, 2)
     Write-Ok "packed $sizeMB MB (node_modules / .next / .env excluded)"
 
-    & scp -q $tarball "${Server}:$remoteTar"
+    & scp @SshBase -q $tarball "${Server}:$remoteTar"
     if ($LASTEXITCODE -ne 0) { Fail 'scp upload failed' }
     Write-Ok 'uploaded'
 
     # Extract over the existing tree. The remote .env is untouched because we
     # never packed it.
     $extract = "mkdir -p $RemotePath && tar -xzf $remoteTar -C $RemotePath && rm -f $remoteTar && echo EXTRACT_OK"
-    $result = & ssh $Server $extract 2>&1
+    $result = & ssh @SshBase $Server $extract 2>&1
     $resultText = ($result | Out-String)
     if ($LASTEXITCODE -ne 0 -or $resultText -notmatch 'EXTRACT_OK') {
         Write-Host $resultText
@@ -266,13 +316,13 @@ Or via npm:  npm run build:image
     Write-Ok "archive: $archiveMB MB"
 
     $remoteArchive = '/tmp/bbs-images.tar.gz'
-    & scp -q $archive "${Server}:$remoteArchive"
+    & scp @SshBase -q $archive "${Server}:$remoteArchive"
     if ($LASTEXITCODE -ne 0) { Fail 'scp of image archive failed' }
     Write-Ok 'uploaded'
 
     Write-Host '       loading images on the server (may take a minute)' -ForegroundColor DarkGray
     $loadCmd = "docker load -i $remoteArchive && rm -f $remoteArchive && echo LOAD_OK"
-    $loadOut = & ssh $Server $loadCmd 2>&1
+    $loadOut = & ssh @SshBase $Server $loadCmd 2>&1
     $loadText = ($loadOut | Out-String)
     if ($LASTEXITCODE -ne 0 -or $loadText -notmatch 'LOAD_OK') {
         Write-Host $loadText
@@ -305,7 +355,7 @@ if ($NoBuild) { $deployArgs += '--no-build' }
 if ($Smoke)   { $deployArgs += '--smoke' }
 
 $remoteCmd = "cd $RemotePath && bash scripts/deploy.sh $($deployArgs -join ' ')"
-& ssh -t $Server $remoteCmd
+& ssh @SshBase -t $Server $remoteCmd
 $deployExit = $LASTEXITCODE
 
 if ($deployExit -ne 0) {
