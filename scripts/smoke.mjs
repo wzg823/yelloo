@@ -391,6 +391,21 @@ async function main() {
     if (data?.message) received.push({ at: Date.now(), id, message: data.message })
   })
 
+  // 变更事件单独收集。
+  //
+  // ★ 这两条断言存在的原因 ★
+  // 客户端曾经把 updated / deleted 也送进"新增"那条按 id 去重的路径，
+  // 于是广播虽然发了、却被静默丢弃 —— 外部表现是"实时已连接，但看不到
+  // 别人的编辑与删除"。服务端这一侧是对的，所以这里必须钉住服务端行为；
+  // 客户端那一侧的归并逻辑由 scripts/test-message-list.mjs 覆盖。
+  const updates = []
+  sse.on('message.updated', ({ id, data }) => {
+    if (data?.message) updates.push({ at: Date.now(), id, message: data.message })
+  })
+  sse.on('message.deleted', ({ id, data }) => {
+    if (data?.message) updates.push({ at: Date.now(), id, message: data.message })
+  })
+
   sse.on('resync', ({ id, data }) => {
     if (data?.reason === 'ready') {
       // ★ 游标在 SSE 的 `id:` 行上，不在 payload 里 ★
@@ -455,6 +470,7 @@ async function main() {
   section('5. 实时投递（核心验收）')
   const content = `smoke 端到端验证 ${stamp} ${new Date().toISOString()}`
   let sentAt = 0
+  let sentId = null
 
   try {
     sentAt = Date.now()
@@ -498,6 +514,7 @@ async function main() {
     }
 
     record('B 发送消息', true, `id=${String(body.message.id).slice(-8)}`)
+    sentId = String(body.message.id)
 
     // 游标必须是纯数字的 Snowflake —— 验证 BigInt 序列化没有退化成科学计数法
     const idStr = String(body.message.id)
@@ -535,6 +552,82 @@ async function main() {
       false,
       `${DELIVERY_BUDGET_MS}ms 内未收到。若站点能正常刷新看到消息，问题在 SSE 链路`,
     )
+  }
+
+  // ── 5b. 编辑与删除的广播 ────────────────────────────────────────────
+  //
+  // 这一步补上的是"变更类事件到底有没有发出去"。之前只验证了 message.created，
+  // 而客户端恰好把 updated/deleted 丢掉了 —— 服务端一侧是对的，但没人测过。
+  section('5b. 编辑 / 删除的广播')
+  if (!sentId) {
+    record('取得已发送消息的 id', false, '上一步未返回 id，跳过广播验证')
+  } else {
+    const editedContent = `${content}（已编辑）`
+    let editStatus = 0
+    const editSentAt = Date.now()
+    try {
+      const res = await tfetch(`${BASE}/api/messages/${sentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: bob.cookie },
+        body: JSON.stringify({ content: editedContent }),
+      })
+      editStatus = res.status
+    } catch (err) {
+      void err
+    }
+    record('B 编辑自己的消息', editStatus === 200, `HTTP ${editStatus}`)
+
+    {
+      const waitUntil = Date.now() + DELIVERY_BUDGET_MS
+      let seenEdit = null
+      while (Date.now() < waitUntil) {
+        seenEdit = updates.find(
+          (u) => String(u.message.id) === sentId && u.message.content_md === editedContent,
+        )
+        if (seenEdit) break
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      record(
+        'A 实时收到 message.updated（编辑会广播）',
+        Boolean(seenEdit),
+        seenEdit ? `延迟 ${seenEdit.at - editSentAt}ms` : `${DELIVERY_BUDGET_MS}ms 内未收到`,
+      )
+    }
+
+    let delStatus = 0
+    const delSentAt = Date.now()
+    try {
+      const res = await tfetch(`${BASE}/api/messages/${sentId}`, {
+        method: 'DELETE',
+        headers: { Cookie: bob.cookie },
+      })
+      delStatus = res.status
+    } catch (err) {
+      void err
+    }
+    record('B 删除自己的消息', delStatus === 200, `HTTP ${delStatus}`)
+
+    {
+      const waitUntil = Date.now() + DELIVERY_BUDGET_MS
+      let seenDel = null
+      while (Date.now() < waitUntil) {
+        seenDel = updates.find(
+          (u) => String(u.message.id) === sentId && u.message.is_deleted === true,
+        )
+        if (seenDel) break
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      record(
+        'A 实时收到 message.deleted（删除会广播）',
+        Boolean(seenDel),
+        seenDel ? `延迟 ${seenDel.at - delSentAt}ms` : `${DELIVERY_BUDGET_MS}ms 内未收到`,
+      )
+      record(
+        '广播的墓碑不含正文（删除后内容不能随事件外泄）',
+        Boolean(seenDel) && seenDel.message.content_md === '',
+        seenDel ? `content_md=${JSON.stringify(seenDel.message.content_md)}` : '未收到事件',
+      )
+    }
   }
 
   // ── 6. 心跳（判断中间层是否缓冲）─────────────────────────────────────

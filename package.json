@@ -15,6 +15,7 @@
     "db:seed": "node --env-file=.env scripts/seed.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test:trust": "node scripts/test-trust.mjs",
+    "test:list": "node scripts/test-message-list.mjs",
     "deploy": "bash scripts/deploy.sh",
     "deploy:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1",
     "build:image": "wsl -d Ubuntu -u root -- bash \"/mnt/e/dsh project bbs/scripts/build-image.sh\""

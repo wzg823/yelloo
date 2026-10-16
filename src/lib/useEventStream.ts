@@ -10,6 +10,20 @@
  * 3. 收到 `resync` 事件表示服务端要求重新拉取——交给页面自行处理（通常是
  *    调用一个 refresh 回调重新取当前频道首屏）
  * 4. 连续失败达阈值后切换到轮询 `/api/sync`，并指数退避尝试恢复 SSE
+ *
+ * ── 为什么"新增"和"变更"必须是两个回调 ──────────────────────────────
+ *
+ * 早期版本把 `message.created` / `message.updated` / `message.deleted`
+ * 三种事件都塞进 `onMessages`，而那条路径按 id 去重：
+ *
+ *     if (seen.has(m.id)) continue
+ *
+ * 于是"已存在消息的变更"被无条件丢弃，表现为：别人看不到你的编辑、
+ * 看不到附件被补上、也看不到消息被删除。它不报错、连接状态还显示
+ * "实时已连接"，所以从外部完全看不出问题。
+ *
+ * 新增要**按 id 去重**，变更必须**按 id 覆盖** —— 两个相反的语义，
+ * 不能共用一个入口。归并逻辑本身在 `src/lib/message-list.ts`（纯函数、有单测）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PublicMessage } from '@/lib/serialize'
@@ -21,8 +35,21 @@ type Options = {
   initialCursor: string
   /** 是否启用（未登录时不启用，避免 401 重连风暴） */
   enabled: boolean
-  /** 收到消息时回调。多条消息按 id 升序依次回调 */
+  /** 收到**新消息**时回调。多条按 id 升序依次回调 */
   onMessages: (messages: PublicMessage[]) => void
+  /**
+   * 收到**已存在消息的变更**时回调（编辑 / 附件补充 / 删除）。
+   * 调用方应当按 id 覆盖，**不要**再去重跳过。
+   */
+  onUpdates?: (messages: PublicMessage[]) => void
+  /**
+   * 重新建立连接（或进入降级轮询）后回调。
+   *
+   * 用途：SSE 的补齐流是按 id 的增量（`id > cursor`），而编辑与删除
+   * **不产生新 id**，所以断线期间发生的变更根本不在补齐范围内。
+   * 客户端必须借这个机会把可见窗口重取一遍，否则那些消息会永远停在旧内容。
+   */
+  onReconnected?: () => void
   /** 服务端要求重新同步（背压/补齐失败） */
   onResync?: () => void
 }
@@ -33,11 +60,21 @@ const FAILURES_BEFORE_POLLING = 3
 const POLL_INTERVAL_MS = 5_000
 /** SSE 重连尝试间隔上限 */
 const MAX_RECONNECT_DELAY_MS = 30_000
+/**
+ * 降级轮询模式下，每多少次轮询做一次"窗口刷新"。
+ *
+ * `/api/sync` 同样只返回新增消息，所以轮询模式下编辑与删除也不会到达。
+ * 每 6 次（约 30 秒）重取一次可见窗口来兜住这种情况 —— 比每次轮询都重取
+ * 便宜 6 倍，又不会让降级用户永远看到旧内容。
+ */
+const POLLS_PER_WINDOW_REFRESH = 6
 
 export function useEventStream({
   initialCursor,
   enabled,
   onMessages,
+  onUpdates,
+  onReconnected,
   onResync,
 }: Options): StreamStatus {
   const [status, setStatus] = useState<StreamStatus>('connecting')
@@ -45,11 +82,19 @@ export function useEventStream({
   // 用 ref 保存游标与回调：它们的更新不应触发重连
   const cursorRef = useRef<string>(initialCursor)
   const onMessagesRef = useRef(onMessages)
+  const onUpdatesRef = useRef(onUpdates)
+  const onReconnectedRef = useRef(onReconnected)
   const onResyncRef = useRef(onResync)
 
   useEffect(() => {
     onMessagesRef.current = onMessages
   }, [onMessages])
+  useEffect(() => {
+    onUpdatesRef.current = onUpdates
+  }, [onUpdates])
+  useEffect(() => {
+    onReconnectedRef.current = onReconnected
+  }, [onReconnected])
   useEffect(() => {
     onResyncRef.current = onResync
   }, [onResync])
@@ -70,6 +115,15 @@ export function useEventStream({
     onMessagesRef.current(sorted)
   }, [])
 
+  /**
+   * 变更事件：**不**推进游标，也**不**排序。
+   * 更新的通常是旧消息，推进游标会把它误当成"已补齐"。
+   */
+  const applyUpdates = useCallback((list: PublicMessage[]) => {
+    if (list.length === 0) return
+    onUpdatesRef.current?.(list)
+  }, [])
+
   useEffect(() => {
     if (!enabled) {
       setStatus('offline')
@@ -81,6 +135,9 @@ export function useEventStream({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let failures = 0
     let mode: 'sse' | 'poll' = 'sse'
+    /** 首次连接不算"重连"：此时页面刚由服务端渲染，数据是新的 */
+    let everConnected = false
+    let pollsSinceRefresh = 0
 
     const stopPolling = () => {
       if (pollTimer) {
@@ -104,6 +161,13 @@ export function useEventStream({
         if (disposed) return
         applyMessages(data.messages ?? [])
         setStatus('polling')
+
+        // 轮询流里同样没有"变更"事件（按 id 增量），定期重取窗口兜住编辑与删除
+        pollsSinceRefresh += 1
+        if (pollsSinceRefresh >= POLLS_PER_WINDOW_REFRESH) {
+          pollsSinceRefresh = 0
+          onReconnectedRef.current?.()
+        }
       } catch {
         if (!disposed) setStatus('offline')
       }
@@ -146,9 +210,13 @@ export function useEventStream({
         mode = 'sse'
         stopPolling()
         setStatus('live')
+
+        // 重连（非首次）后重取可见窗口：断线期间的编辑/删除不在补齐范围内
+        if (everConnected) onReconnectedRef.current?.()
+        everConnected = true
       })
 
-      const ingest = (ev: MessageEvent<string>) => {
+      const ingestNew = (ev: MessageEvent<string>) => {
         try {
           const parsed = JSON.parse(ev.data) as { message?: PublicMessage }
           if (parsed.message) applyMessages([parsed.message])
@@ -157,19 +225,19 @@ export function useEventStream({
         }
       }
 
-      es.addEventListener('message.created', ingest)
-      es.addEventListener('message.updated', ingest)
-
-      es.addEventListener('message.deleted', (ev) => {
+      const ingestUpdate = (ev: MessageEvent<string>) => {
         try {
-          const parsed = JSON.parse((ev as MessageEvent<string>).data) as {
-            message?: PublicMessage
-          }
-          if (parsed.message) applyMessages([parsed.message])
+          const parsed = JSON.parse(ev.data) as { message?: PublicMessage }
+          if (parsed.message) applyUpdates([parsed.message])
         } catch {
           /* 忽略 */
         }
-      })
+      }
+
+      es.addEventListener('message.created', ingestNew)
+      // ★ 变更走另一条回调 ★ 见文件头说明：走 onMessages 会被去重丢掉
+      es.addEventListener('message.updated', ingestUpdate)
+      es.addEventListener('message.deleted', ingestUpdate)
 
       es.addEventListener('resync', (ev) => {
         try {
@@ -209,7 +277,7 @@ export function useEventStream({
       stopPolling()
       if (reconnectTimer) clearTimeout(reconnectTimer)
     }
-  }, [enabled, applyMessages])
+  }, [enabled, applyMessages, applyUpdates])
 
   return status
 }

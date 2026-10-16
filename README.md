@@ -67,6 +67,7 @@ npm run dev            # → http://localhost:3000
 | `npm run typecheck` | TypeScript 检查（CI 必跑） |
 | `npm run smoke` | **端到端验证**：注册 → 发消息 → 跨用户实时投递 + 心跳检测（需 `SMOKE_PASSWORD`，见下） |
 | `npm run test:trust` | **新人限流策略单元测试**：注入假时钟穷举 10 分钟 / 24 小时边界、配额、员工豁免（不需要数据库） |
+| `npm run test:list` | **消息列表归并单元测试**：去重、乐观认领、变更覆盖（不需要数据库） |
 | `npm run build:image` | **在 WSL 里构建镜像并导出**（低内存服务器的正确做法） |
 | `npm run deploy` | 部署到服务器（**在服务器上执行**，见 [docs/DEPLOY.md](docs/DEPLOY.md) 第 4 节） |
 | `npm run deploy:local -- -Server root@IP` | 从 Windows 本地编排部署（打包上传 + 远程部署 + 验证） |
@@ -135,6 +136,7 @@ src/
 │  │  ├─ events/route.ts             ★ SSE 主端点
 │  │  ├─ sync/route.ts               降级轮询端点
 │  │  ├─ messages/route.ts           发送消息
+│  │  ├─ messages/[id]/route.ts      ★ 编辑（PATCH）/ 删除（DELETE）
 │  │  ├─ channels/[id]/messages/     历史分页
 │  │  ├─ read/route.ts               已读位点
 │  │  └─ health/route.ts             健康检查（供容器/LB）
@@ -154,8 +156,11 @@ src/
    ├─ snowflake.ts                   ★ 消息 ID 生成
    ├─ realtime/hub.ts                ★ 实时扇出
    ├─ useEventStream.ts              ★ 客户端 SSE + 降级轮询
+   ├─ message-list.ts                ★ 消息列表归并（纯函数，有单测）
+   ├─ trust.ts                       ★ 新人限流策略（纯函数，有单测）
    ├─ queries.ts                     数据访问层
    ├─ session.ts / password.ts       会话与密码
+   ├─ password-policy.ts             密码强度策略（单一来源）
    ├─ permissions.ts                 权限位
    ├─ markdown.ts                    白名单式 Markdown 渲染（防 XSS）
    ├─ ratelimit.ts / audit.ts        限流与审计
@@ -227,9 +232,13 @@ src/
 
 这些是**有意为之**的取舍，不是遗漏：
 
-- 消息编辑 / 删除未实现：软删除字段已在表里，客户端也已支持 `message.deleted` 事件（P2）
 - 举报、封禁、审计日志只有表与工具函数，没有管理界面（P2）
+- 删除是**不可逆**的：正文在库里清空、附件文件从卷里删掉，`MESSAGE_RESTORE`
+  只能恢复成一条空消息。删除前的最后版本会留在 `message_edits`（管理侧可查），
+  所以"处置留痕"与"用户真的删掉了"这两件事可以同时成立
 - forum 类型频道目前与 text 频道行为一致，未做"一帖一帖"的独立 URL（P3）
 - 评论/反应（reactions）只有表结构（P3）
 - 无邮件发送：注册不做邮箱验证，忘记密码流程未实现（P2；运维可用 `scripts/set-password.mjs` 手动重置）
 - 无速率限制的分布式实现：当前是进程内滑动窗口，多实例下额度会乘以实例数（P4）
+- 编辑与删除**不在 SSE 断线补齐范围内**（补齐按 id 增量，而它们不产生新 id）。
+  客户端在重连后与降级轮询期间会重取可见窗口来兜住，详见 [docs/EVENTS.md](docs/EVENTS.md) 第 4 节

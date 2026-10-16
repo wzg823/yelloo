@@ -34,6 +34,16 @@ export const RATE_RULES = {
   createThread: { windowMs: 60 * 60 * 1000, max: 10 },
   upload: { windowMs: 60 * 60 * 1000, max: 30 },
   report: { windowMs: 60 * 60 * 1000, max: 20 },
+  /**
+   * 编辑自己的消息。
+   *
+   * 为什么需要限流：编辑会广播 `message.updated`，反复改同一条消息
+   * 就等于在不发新消息的情况下持续占用所有人的屏幕 —— 是一种绕过
+   * 发帖限流的刷屏方式。20 次/5 分钟对正常改错字绰绰有余。
+   */
+  editMessage: { windowMs: 5 * 60 * 1000, max: 20 },
+  /** 删除比编辑宽松得多：删错了用户要能立刻删对 */
+  deleteMessage: { windowMs: 60 * 60 * 1000, max: 60 },
 } satisfies Record<string, RateLimitRule>
 
 export type RateLimitResult = {

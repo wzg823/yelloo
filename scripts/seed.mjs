@@ -138,21 +138,39 @@ async function main() {
   } else {
     for (const fixture of seedData.testFixtures) {
       const email = fixture.email.toLowerCase()
+      // 夹具默认是普通成员；smokem 是版主，用来验证"管理删别人的帖子"这条路径
+      const role = fixture.role ?? 'member'
       const found = await db
-        .select({ id: schema.users.id, trustLevel: schema.users.trustLevel })
+        .select({
+          id: schema.users.id,
+          trustLevel: schema.users.trustLevel,
+          role: schema.users.role,
+        })
         .from(schema.users)
         .where(sql`lower(${schema.users.email}) = ${email}`)
         .limit(1)
 
       if (found.length > 0) {
-        // 已存在：只补齐信任等级，不碰口令
+        // 已存在：只补齐信任等级与角色，不碰口令
         // （改口令是 scripts/set-password.mjs 的职责，它有撤销会话的语义）
-        if (found[0].trustLevel < 1) {
-          await db
-            .update(schema.users)
-            .set({ trustLevel: 1 })
-            .where(eq(schema.users.id, found[0].id))
-          console.log(`→ 提升 ${fixture.handle} 的 trust_level 到 1（原为 ${found[0].trustLevel}）`)
+        //
+        // 角色也一起纠正，是为了让本脚本**幂等收敛**：夹具的状态由这里定义，
+        // 手工改坏了再跑一次 seed 就能回到已知状态。
+        const patch = {}
+        if (found[0].trustLevel < 1) patch.trustLevel = 1
+        if (found[0].role !== role) patch.role = role
+
+        if (Object.keys(patch).length > 0) {
+          await db.update(schema.users).set(patch).where(eq(schema.users.id, found[0].id))
+          console.log(
+            `→ 修正夹具 ${fixture.handle}：` +
+              [
+                patch.trustLevel !== undefined ? `trust_level ${found[0].trustLevel} → 1` : null,
+                patch.role !== undefined ? `role ${found[0].role} → ${role}` : null,
+              ]
+                .filter(Boolean)
+                .join('，'),
+          )
         }
         continue
       }
@@ -162,11 +180,13 @@ async function main() {
         email,
         passwordHash: await hash(fixturePassword, ARGON2_OPTIONS),
         displayName: fixture.displayName,
-        role: 'member',
+        role,
         trustLevel: 1,
         emailVerifiedAt: new Date(),
       })
-      console.log(`→ 已创建验证用账号：${fixture.handle} <${email}>（trust_level=1）`)
+      console.log(
+        `→ 已创建验证用账号：${fixture.handle} <${email}>（role=${role}，trust_level=1）`,
+      )
     }
   }
 

@@ -73,6 +73,12 @@
       "handle": "smokeb",
       "email": "smoke-b@smoke.test",
       "displayName": "冒烟测试 B"
+    },
+    {
+      "handle": "smokem",
+      "email": "smoke-m@smoke.test",
+      "displayName": "冒烟测试版主",
+      "role": "mod"
     }
   ]
 }

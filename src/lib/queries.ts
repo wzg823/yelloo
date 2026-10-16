@@ -8,7 +8,7 @@
  */
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm'
 import { db } from '@/db'
-import { attachments, channels, messages, readStates, users } from '@/db/schema'
+import { attachments, channels, messageEdits, messages, readStates, users } from '@/db/schema'
 import { parseId } from './snowflake'
 import { IMAGE_TYPES, attachmentUrl } from './storage'
 import {
@@ -513,12 +513,131 @@ export async function insertMessage(input: InsertMessageInput): Promise<void> {
   })
 }
 
-export async function softDeleteMessage(messageId: bigint, deletedBy: number): Promise<boolean> {
-  const result = await db
-    .update(messages)
-    .set({ isDeleted: true, deletedBy, contentHtml: null })
-    .where(and(eq(messages.id, messageId), eq(messages.isDeleted, false)))
-  return (result.rowCount ?? 0) > 0
+export type UpdateMessageInput = {
+  id: bigint
+  contentMd: string
+  contentHtml: string
+  editedBy: number
+}
+
+/**
+ * 编辑消息，并把**上一版内容**记入 `message_edits`。
+ *
+ * 记"上一版"而不是"新内容"：新内容就在 `messages` 行里，重复存一份没有意义；
+ * 而上一版一旦被覆盖就再也找不回来。这样 N 次编辑留下的 N 条记录，
+ * 加上当前行，恰好构成完整历史。
+ *
+ * 权限检查不在这里 —— 数据层不做鉴权，否则每个调用点都要猜"这个函数
+ * 有没有替我检查过"。路由负责判定，这里只负责写。
+ *
+ * @returns false 表示消息不存在或已被删除（调用方按 409 处理）
+ *
+ * 并发说明：同一条消息被并发编辑时，两次都可能读到同一个旧版本，
+ * 于是历史里出现一条重复记录、edit_count 加 2。这是**有意的取舍**：
+ * 为它能见度极低的场景加 `SELECT ... FOR UPDATE` 会把写路径复杂化，
+ * 而结果依然是"最后一次提交生效"，没有数据损坏。
+ */
+export async function updateMessage(input: UpdateMessageInput): Promise<boolean> {
+  return await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ contentMd: messages.contentMd, isDeleted: messages.isDeleted })
+      .from(messages)
+      .where(eq(messages.id, input.id))
+      .limit(1)
+
+    const current = rows[0]
+    if (!current || current.isDeleted) return false
+
+    // 内容没变就不记历史、也不动 edited_at —— 否则"打开编辑框又原样保存"
+    // 也会留下一条修订记录，历史会被噪音淹没
+    if (current.contentMd === input.contentMd) return true
+
+    await tx.insert(messageEdits).values({
+      messageId: input.id,
+      contentMd: current.contentMd,
+      editedBy: input.editedBy,
+    })
+
+    await tx
+      .update(messages)
+      .set({
+        contentMd: input.contentMd,
+        contentHtml: input.contentHtml,
+        editedAt: new Date(),
+        editCount: sql`${messages.editCount} + 1`,
+      })
+      .where(eq(messages.id, input.id))
+
+    return true
+  })
+}
+
+export type SoftDeleteResult =
+  | { ok: true; attachmentKeys: string[] }
+  /** missing = 消息不存在；already_deleted = 已经是删除状态（幂等，不算错） */
+  | { ok: false; reason: 'missing' | 'already_deleted' }
+
+/**
+ * 软删除消息。
+ *
+ * 做四件事，全部在同一个事务里：
+ *   1. 把**删除前的正文**记入 `message_edits` —— 公开 API 永远拿不到它，
+ *      但申诉/复盘时能回答"这条消息被删之前写了什么"
+ *   2. 删除附件**记录**（软删除不会触发外键级联，必须显式删）
+ *   3. 把 `content_md` 真正清空
+ *   4. 置 is_deleted / deleted_by
+ *
+ * ★ 关于第 3 点 ★
+ * 只在 API 层清空（靠 `toPublicMessage` 过滤）是不够的：任何绕过序列化层的
+ * 查询都能读到原文，搜索、导出、将来某个随手写的统计脚本都可能是那条路径。
+ * 这里直接清库，序列化层的过滤降级为第二道防线。
+ *
+ * 「删除」因此是**不可逆**的：正文与附件文件都会消失，`MESSAGE_RESTORE`
+ * 只能恢复成一条空消息。这是刻意的 —— 用户点"删除"时期待的就是它没了。
+ *
+ * 文件不在这里删：数据层不做文件 IO。调用方拿到 attachmentKeys 后自行 unlink。
+ */
+export async function softDeleteMessage(
+  messageId: bigint,
+  deletedBy: number,
+): Promise<SoftDeleteResult> {
+  return await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ contentMd: messages.contentMd, isDeleted: messages.isDeleted })
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .limit(1)
+
+    const current = rows[0]
+    if (!current) return { ok: false, reason: 'missing' }
+    if (current.isDeleted) return { ok: false, reason: 'already_deleted' }
+
+    if (current.contentMd.length > 0) {
+      await tx.insert(messageEdits).values({
+        messageId,
+        contentMd: current.contentMd,
+        editedBy: deletedBy,
+      })
+    }
+
+    const removed = await tx
+      .delete(attachments)
+      .where(eq(attachments.messageId, messageId))
+      .returning({ storageKey: attachments.storageKey })
+
+    await tx
+      .update(messages)
+      .set({
+        isDeleted: true,
+        deletedBy,
+        contentMd: '',
+        contentHtml: null,
+        attachmentCount: 0,
+      })
+      .where(eq(messages.id, messageId))
+
+    return { ok: true, attachmentKeys: removed.map((r) => r.storageKey) }
+  })
 }
 
 export { parseId }

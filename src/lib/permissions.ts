@@ -21,6 +21,12 @@ export const PERM = {
   MANAGE_REPORT: 1n << 10n,
   VIEW_AUDIT_LOG: 1n << 11n,
   MENTION_EVERYONE: 1n << 12n,
+  /**
+   * 删除自己的消息。刻意与 EDIT_OWN_MESSAGE 分开：
+   * 两者是不同性质的权力——一个社区可能希望允许改错字，但不允许把
+   * 已发出的内容随手抹掉（或者反过来）。合成一个位就再也拆不开了。
+   */
+  DELETE_OWN_MESSAGE: 1n << 13n,
   ADMINISTRATOR: 1n << 62n,
 } as const
 
@@ -32,7 +38,8 @@ export const BASE_MEMBER_PERMS: bigint =
   PERM.SEND_MESSAGE |
   PERM.ATTACH_FILES |
   PERM.CREATE_THREAD |
-  PERM.EDIT_OWN_MESSAGE
+  PERM.EDIT_OWN_MESSAGE |
+  PERM.DELETE_OWN_MESSAGE
 
 /** 游客（未登录）：只读 */
 export const GUEST_PERMS: bigint = PERM.VIEW
@@ -83,6 +90,19 @@ export function describePerms(perms: bigint): PermissionName[] {
 /** bigint → 十进制字符串，用于写入权限位为 bigint 的列 */
 export function permToString(perms: bigint): string {
   return perms.toString()
+}
+
+/**
+ * "这个人算不算管理" —— 供**客户端渲染**决定是否显示按钮。
+ *
+ * 刻意不复用 `hasPerm`：客户端拿不到权限位（`SessionSnapshot` 里没有 perms，
+ * 见 `session-context.tsx`），而且角色→权限的映射一旦在客户端算，
+ * 就会出现"前端以为有权限、后端算出来没有"这种最难查的不一致。
+ *
+ * ★ 它只影响按钮显不显示。任何写操作都必须在服务端重新判定。★
+ */
+export function isModeratorRole(role: string | null | undefined): boolean {
+  return role === 'admin' || role === 'mod'
 }
 
 export function permFromString(raw: string | null | undefined): bigint {

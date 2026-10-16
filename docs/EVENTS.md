@@ -91,11 +91,41 @@ data: <JSON>
 | `event` | 触发时机 | `data` |
 |---|---|---|
 | `message.created` | 新消息落库后 | `{ message: PublicMessage }` |
-| `message.updated` | 编辑（P2 启用） | `{ message: PublicMessage }` |
-| `message.deleted` | 软删除（P2 启用） | `{ message: PublicMessage }` |
+| `message.updated` | 消息内容变化：编辑、或补充附件 | `{ message: PublicMessage }` |
+| `message.deleted` | 软删除 | `{ message: PublicMessage }`（墓碑，正文已清空） |
 | `channel.updated` | 频道改名/归档（P2） | `{ channel: {...} }` |
 | `typing` | 有人正在输入（P3） | `{ channel_id, user_id }` |
 | `resync` | 见下 | 见下 |
+
+### ★ 变更事件不能走"新增"那条路径 ★
+
+这是一个踩过的坑，写在这里以防回归。
+
+`message.created` 与 `message.updated` / `message.deleted` 的载荷形状**完全相同**
+（都是完整的 `PublicMessage`），看起来可以共用一个处理器 —— 但它们的归并语义
+**正好相反**：
+
+| 事件 | 归并规则 | 理由 |
+|---|---|---|
+| `message.created` | 按 id **去重**，没见过的才追加 | 同一条消息会从 SSE、降级轮询、断线补齐三条路径重复到达 |
+| `message.updated` / `message.deleted` | 按 id **覆盖**，见过的必须替换 | 它的 id 一定已经见过——这正是它是"变更"的定义 |
+
+早期版本共用一个回调，于是变更被 `if (seen.has(id)) continue` 无条件丢弃。
+后果是：别人看不到你的编辑、看不到附件被补上、看不到消息被删除；
+而连接状态还显示"实时已连接"，**从外部完全看不出问题**。
+
+现在两边的实现分别在 `src/lib/message-list.ts` 的 `ingestCreated` 与
+`applyMessageUpdate`，并由 `scripts/test-message-list.mjs` 钉住行为。
+
+### 编辑与删除不在补齐范围内
+
+补齐流是 `id > cursor` 的增量，而编辑与删除**不产生新的 id**，
+所以断线期间发生的这类变更**不会**在重连补发。客户端必须自己兜：
+
+- SSE 重连成功后：重取当前频道最后一页，按 id 覆盖（`onReconnected`）
+- 降级轮询模式下：每 6 次轮询（约 30 秒）做一次同样的窗口刷新
+
+不兜的话，那些消息会永远停在旧内容 —— 而这恰好是"看起来正常"的那类故障。
 
 ### `resync` 是一个多用途事件
 
@@ -169,7 +199,9 @@ data: <JSON>
 connect()
   ├─ new EventSource('/api/events?since=' + cursor)
   ├─ open         → status='live'，清零失败计数，停止轮询
-  ├─ message.created / message.updated → 去重后追加，推进游标
+  │                 非首次连接 → onReconnected()（重取窗口，兜住断线期间的编辑/删除）
+  ├─ message.created          → onMessages：去重后追加，推进游标
+  ├─ message.updated/deleted  → onUpdates ：按 id 覆盖，**不**推进游标
   ├─ resync       → reason 为 ready 则校准游标，否则触发重拉
   └─ error        → 主动 close，自己调度重连
                     连续失败 ≥ 3 次 → 启动 5 秒轮询兜底
@@ -195,6 +227,10 @@ connect()
 与 SSE 补齐共用 `listMessagesSince()`，因此**两条路径的数据形状完全一致**，
 前端不需要分支处理。轮询模式下仍会持续尝试恢复 SSE（指数退避），
 成功则自动切回。
+
+> 轮询只返回**新增**消息（同样是 `id > cursor` 的增量），所以编辑与删除
+> 不会随轮询到达。客户端每 6 次轮询（约 30 秒）重取一次可见窗口来兜住它
+> （`POLLS_PER_WINDOW_REFRESH`）。见第 4 节"编辑与删除不在补齐范围内"。
 
 ---
 

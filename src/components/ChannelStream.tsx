@@ -3,20 +3,30 @@
 /**
  * 频道消息流。
  *
- * 三个必须处理对的点，否则会以很难查的方式出错：
+ * 四个必须处理对的点，否则会以很难查的方式出错：
  *
  * 1. **去重**：SSE 推送、降级轮询、补齐重放三条路径可能送来同一条消息，
- *    必须按 id 去重（用 ref 保存 Set，避免每次 setState 都重建索引）。
- * 2. **乐观插入**：自己发的消息本地立即显示（带 pending 样式），
+ *    必须按 id 去重。归并逻辑已抽到 `src/lib/message-list.ts`（纯函数，有单测）。
+ * 2. **变更 ≠ 新增**：`message.updated` / `message.deleted` 必须**按 id 覆盖**，
+ *    走"新增"那条路会被去重静默丢掉 —— 这正是"看不到别人的编辑与删除"的成因。
+ * 3. **乐观插入**：自己发的消息本地立即显示（带 pending 样式），
  *    收到服务端广播后按 id 替换。不做这步用户会感觉"发出去没反应"。
- * 3. **提交竞态**：服务端广播可能比 `await fetch` 的响应先到。
+ * 4. **提交竞态**：服务端广播可能比 `await fetch` 的响应先到。
  *    因此乐观条目不绑定临时 id，而是靠「作者是自己 + 内容完全相同」来认领。
+ *
+ * ── 为什么 messages 同时存在 state 与 ref ────────────────────────────
+ * 同一批次里连续到达多条事件时，第二次调用拿到的仍是上一次渲染时的
+ * `messages`（React 还没重渲染），后到的消息会被追加到一个"不含前一条"的
+ * 列表上，于是**丢消息**。所以所有写入都收敛到 `commitMessages`：
+ * 它同时更新 ref 与 state，保证回调里读到的永远是最新值。
+ * 删除路径同理（`commitPending`）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MessageItem } from './MessageItem'
 import { Composer } from './Composer'
 import { useEventStream, type StreamStatus } from '@/lib/useEventStream'
 import { useSession } from '@/lib/session-context'
+import { applyMessageUpdate, ingestCreated } from '@/lib/message-list'
 import type { PublicMessage } from '@/lib/serialize'
 
 type Props = {
@@ -58,13 +68,26 @@ export function ChannelStream({
   const endRef = useRef<HTMLDivElement | null>(null)
   const stickToBottom = useRef(true)
 
-  // pending 同时存在 state（用于渲染）与 ref（用于在 useCallback 里读到最新值，
-  // 避免把 pending 放进依赖数组导致回调每次渲染都重建、进而让 SSE 重连）
+  /** 与 state 同步的 ref：回调里必须读到最新值，见文件头说明 */
+  const messagesRef = useRef<PublicMessage[]>(initialMessages)
   const pendingRef = useRef<PublicMessage[]>([])
-  const removePending = useCallback((id: string) => {
-    pendingRef.current = pendingRef.current.filter((p) => p.id !== id)
-    setPending(pendingRef.current)
+
+  const commitMessages = useCallback((next: PublicMessage[]) => {
+    messagesRef.current = next
+    setMessages(next)
   }, [])
+
+  const commitPending = useCallback((next: PublicMessage[]) => {
+    pendingRef.current = next
+    setPending(next)
+  }, [])
+
+  const removePending = useCallback(
+    (id: string) => {
+      commitPending(pendingRef.current.filter((p) => p.id !== id))
+    },
+    [commitPending],
+  )
 
   /** 刷新侧栏未读红点。失败静默——红点不准确不应打断阅读 */
   const refreshUnread = useCallback(() => {
@@ -85,55 +108,51 @@ export function ChannelStream({
     stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
   }, [])
 
-  // ── 接收消息 ────────────────────────────────────────────────
+  // ── 接收新消息 ──────────────────────────────────────────────
   const handleIncoming = useCallback(
     (incoming: PublicMessage[]) => {
-      const fresh: PublicMessage[] = []
-      // 每个批次只允许"认领"一个乐观条目，避免只有附件（content 为空）的消息
-      // 把多条待确认条目一次全部误删
-      let claimed = false
+      const before = messagesRef.current
+      const result = ingestCreated({
+        messages: before,
+        pending: pendingRef.current,
+        seen: seen.current,
+        incoming,
+        channelId,
+        selfId: user?.id ?? null,
+      })
 
-      for (const m of incoming) {
-        // 服务端回显：与本地待确认条目是同一作者、同频道、同内容 → 视为同一条
-        if (!claimed && user && m.author?.id === user.id && m.channel_id === channelId) {
-          const idx = pending.some((p) => p.content_md === m.content_md)
-          if (idx) {
-            claimed = true
-            const contentKey = m.content_md
-            pendingRef.current = pendingRef.current.filter(
-              (p) => !(p.channel_id === channelId && p.content_md === contentKey),
-            )
-            setPending(pendingRef.current)
-            // 本地已乐观渲染，不再重复插入
-            if (seen.current.has(m.id)) continue
-            seen.current.add(m.id)
-            setMessages((prev) => [...prev, m])
-            continue
-          }
+      if (result.pending !== pendingRef.current) commitPending(result.pending)
+      if (result.messages === before) return
+
+      commitMessages(result.messages)
+
+      // 只在新消息真的追加进来时推进已读位点
+      if (result.messages.length > before.length) {
+        const last = result.messages[result.messages.length - 1]
+        if (last) {
+          void fetch('/api/read', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ channel_id: channelId, message_id: last.id }),
+          })
+            .then(() => refreshUnread())
+            .catch(() => {})
         }
-
-        if (seen.current.has(m.id)) continue
-        seen.current.add(m.id)
-        if (m.channel_id === channelId) fresh.push(m)
-      }
-
-      if (fresh.length === 0) return
-
-      setMessages((prev) => [...prev, ...fresh])
-
-      // 推进已读位点：失败不影响阅读，静默忽略
-      const last = fresh[fresh.length - 1]
-      if (last) {
-        void fetch('/api/read', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ channel_id: channelId, message_id: last.id }),
-        })
-          .then(() => refreshUnread())
-          .catch(() => {})
       }
     },
-    [channelId, user, pending, refreshUnread],
+    [channelId, user, commitMessages, commitPending, refreshUnread],
+  )
+
+  // ── 接收变更（编辑 / 附件补充 / 删除）────────────────────────
+  //
+  // 这一条曾经缺失：变更事件被送进 onMessages，被按 id 去重后丢弃，
+  // 于是"别人的编辑和删除"永远看不到。现在按 id 覆盖。
+  const handleUpdates = useCallback(
+    (updated: PublicMessage[]) => {
+      const next = applyMessageUpdate(messagesRef.current, updated)
+      if (next !== messagesRef.current) commitMessages(next)
+    },
+    [commitMessages],
   )
 
   const handleResync = useCallback(async () => {
@@ -149,19 +168,57 @@ export function ChannelStream({
         cursor: string | null
       }
       seen.current = new Set(data.messages.map((m) => m.id))
-      setMessages(data.messages)
+      commitMessages(data.messages)
       setHasMore(data.has_more)
       setOldestCursor(data.cursor)
       stickToBottom.current = true
     } catch {
       /* 交给下一次 resync 或用户刷新 */
     }
-  }, [channelId])
+  }, [channelId, commitMessages])
+
+  /**
+   * 重连后重取可见窗口。
+   *
+   * 为什么必须要：SSE 的补齐流是 `id > cursor` 的增量，而编辑与删除
+   * **不产生新 id**，所以断线期间发生的变更根本不在补齐范围内。
+   * 不重取的话，那些消息会永远停在旧内容 / 旧状态。
+   *
+   * 与 handleResync 的区别：这里是**归并**（保留已有顺序、只覆盖内容、
+   * 补齐期间新增的消息），resync 是**整表替换**（服务端明确说事件丢了）。
+   */
+  const refreshWindow = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/channels/${channelId}/messages?limit=50`, {
+        cache: 'no-store',
+      })
+      if (!res.ok) return
+      const data = (await res.json()) as { messages: PublicMessage[] }
+
+      const ingested = ingestCreated({
+        messages: messagesRef.current,
+        pending: pendingRef.current,
+        seen: seen.current,
+        incoming: data.messages,
+        channelId,
+        selfId: user?.id ?? null,
+      })
+      if (ingested.pending !== pendingRef.current) commitPending(ingested.pending)
+
+      // 服务端返回的是每条的**当前**版本，按 id 覆盖即可修正编辑与删除
+      const merged = applyMessageUpdate(ingested.messages, data.messages)
+      if (merged !== messagesRef.current) commitMessages(merged)
+    } catch {
+      /* 静默：下次重连或轮询刷新还会再来 */
+    }
+  }, [channelId, user, commitMessages, commitPending])
 
   const status = useEventStream({
     initialCursor,
     enabled: Boolean(user),
     onMessages: handleIncoming,
+    onUpdates: handleUpdates,
+    onReconnected: refreshWindow,
     onResync: handleResync,
   })
 
@@ -183,7 +240,7 @@ export function ChannelStream({
         cursor: string | null
       }
       for (const m of data.messages) seen.current.add(m.id)
-      setMessages((prev) => [...data.messages, ...prev])
+      commitMessages([...data.messages, ...messagesRef.current])
       setHasMore(data.has_more)
       setOldestCursor(data.cursor)
       // 保持视觉位置：插入内容后把滚动位置推回到原来的相对位置
@@ -194,7 +251,58 @@ export function ChannelStream({
     } finally {
       setLoadingMore(false)
     }
-  }, [channelId, oldestCursor, loadingMore])
+  }, [channelId, oldestCursor, loadingMore, commitMessages])
+
+  // ── 编辑 / 删除 ─────────────────────────────────────────────
+  //
+  // 改完立即用服务端返回的对象覆盖本地，不等 SSE 广播：
+  // 广播可能因为背压被丢弃，而用户点完按钮必须有即时反馈。
+  // 广播到达时是同一个 id，覆盖一次无害（幂等）。
+  const handleEdit = useCallback(
+    async (target: PublicMessage, content: string): Promise<string | null> => {
+      try {
+        const res = await fetch(`/api/messages/${target.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        })
+        const data = (await res.json().catch(() => ({}))) as {
+          message?: PublicMessage
+          error?: string
+        }
+        if (!res.ok || !data.message) {
+          return data.error ?? `保存失败（${res.status}）`
+        }
+        commitMessages(applyMessageUpdate(messagesRef.current, [data.message]))
+        return null
+      } catch {
+        return '网络错误，请重试'
+      }
+    },
+    [commitMessages],
+  )
+
+  const handleDelete = useCallback(
+    async (target: PublicMessage): Promise<string | null> => {
+      try {
+        const res = await fetch(`/api/messages/${target.id}`, { method: 'DELETE' })
+        const data = (await res.json().catch(() => ({}))) as {
+          message?: PublicMessage
+          error?: string
+        }
+        if (!res.ok || !data.message) {
+          return data.error ?? `删除失败（${res.status}）`
+        }
+        // 返回的是墓碑：仍然留在原位，而不是从列表里消失。
+        // 直接移除会让分页游标出现"空洞"，也让其他人以为消息从未存在过
+        commitMessages(applyMessageUpdate(messagesRef.current, [data.message]))
+        return null
+      } catch {
+        return '网络错误，请重试'
+      }
+    },
+    [commitMessages],
+  )
 
   // ── 发送（含附件上传）───────────────────────────────────────
   const handleSend = useCallback(
@@ -229,8 +337,7 @@ export function ChannelStream({
         reaction_count: 0,
         attachments: [],
       }
-      pendingRef.current = [...pendingRef.current, optimistic]
-      setPending(pendingRef.current)
+      commitPending([...pendingRef.current, optimistic])
       stickToBottom.current = true
 
       // ── 1) 先创建消息 ────────────────────────────────────
@@ -259,9 +366,8 @@ export function ChannelStream({
 
       // 用真实消息替换乐观条目（服务端广播到达时会被去重跳过）
       seen.current.add(created.id)
-      pendingRef.current = pendingRef.current.filter((p) => p.id !== optimistic.id)
-      setPending(pendingRef.current)
-      setMessages((prev) => [...prev, created])
+      commitPending(pendingRef.current.filter((p) => p.id !== optimistic.id))
+      commitMessages([...messagesRef.current, created])
 
       if (files.length === 0) return null
 
@@ -294,8 +400,8 @@ export function ChannelStream({
             attachment_count: uploaded,
             attachments: [...latest.attachments, data.attachment],
           }
-          setMessages((prev) =>
-            prev.map((m) => (m.id === created.id ? { ...m, ...latest } : m)),
+          commitMessages(
+            messagesRef.current.map((m) => (m.id === created.id ? { ...m, ...latest } : m)),
           )
         } catch {
           if (!firstError) firstError = `「${file.name}」上传时网络中断`
@@ -310,13 +416,16 @@ export function ChannelStream({
       // 部分失败要如实告知，否则用户以为都传上去了
       return firstError ? `部分附件未上传成功：${firstError}` : null
     },
-    [channelId, user, removePending],
+    [channelId, user, removePending, commitMessages, commitPending],
   )
 
   const composerDisabled = readOnly
 
   // 用 useMemo 避免每次渲染都生成新数组（会导致列表整体重渲染）
   const rendered = useMemo(() => [...messages], [messages])
+
+  /** 传给 MessageItem 的查看者信息：只用于决定按钮显不显示 */
+  const viewer = user ? { id: user.id, role: user.role } : null
 
   return (
     <>
@@ -346,6 +455,9 @@ export function ChannelStream({
             key={m.id}
             message={m}
             uploading={uploadingId === m.id}
+            viewer={viewer}
+            onEdit={handleEdit}
+            onDelete={handleDelete}
           />
         ))}
 
