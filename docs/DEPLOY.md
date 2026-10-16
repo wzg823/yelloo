@@ -539,6 +539,49 @@ docker compose exec -T \
 > 验证会留下垃圾数据：`nu*@newuser.test` 账号与若干测试消息。
 > 上线前需清理（连同演示账号 alice / bob / carol 一起）。
 
+### 密码重置的端到端验证
+
+`verify-reset.mjs` 需要拿到**真实的一次性令牌**才能走完流程，而令牌只存在于
+邮件正文里，所以必须先让应用进程用 `file` 通道：
+
+```bash
+cd /opt/bbs
+
+# 1) 临时把通道切到 file（写在命令行上，不改 .env）
+MAIL_TRANSPORT=file docker compose up -d app
+
+# 2) 跑验证（脚本里的 -e 只是让它自己的前置检查通过）
+docker compose exec -T -e MAIL_TRANSPORT=file app node scripts/verify-reset.mjs
+
+# 3) 还原成 .env 里的值（不写变量即可）
+docker compose up -d app
+```
+
+> ⚠️ `MAIL_TRANSPORT` 是**应用进程**读的。只给 `docker compose exec -e`
+> 传这个变量不会改变正在运行的服务 —— 脚本在找不到邮件时会明确提示这一点。
+>
+> ⚠️ `file` 通道会把**可用的重置链接落到磁盘上**，所以不要在公网环境长期开着。
+> 上面前两步之间是唯一的窗口，第三步必须执行。
+>
+> 脚本会真的改掉 `smokeb` 的密码，并在结束时改回 `SMOKE_PASSWORD`。
+> 中途失败时用 `NEW_PASSWORD=... node scripts/set-password.mjs smokeb` 恢复。
+
+### 配置真的发信
+
+默认 `MAIL_TRANSPORT=log`：流程正常、令牌正常入库，但邮件只写进日志。
+配好下面任意一种即可开始真实发信，**代码不用改**：
+
+```bash
+# 生产推荐：Resend（接口最简单，一个 POST）
+MAIL_TRANSPORT=resend
+MAIL_API_KEY=re_xxxxxxxx
+MAIL_FROM=no-reply@你的已备案域名
+```
+
+换阿里云邮件推送 / SendGrid 只需在 `src/lib/mailer.ts` 里加一个 adapter
+（约 40 行）。大陆部署建议用阿里云，但需要先把发信域名验证好（SPF/DKIM 记录），
+而那又依赖 ICP 备案 —— 所以这两件事是串行的。
+
 ### 如何解读输出
 
 ```

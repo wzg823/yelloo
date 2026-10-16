@@ -18,6 +18,15 @@ export const AUDIT = {
   USER_ROLE_GRANT: 'user.role_grant',
   USER_ROLE_REVOKE: 'user.role_revoke',
   USER_TRUST_SET: 'user.trust_set',
+  /**
+   * 申请重置。
+   *
+   * ⚠️ 邮箱**不存在时也要记一条**，actorId 为 null。
+   * 只在存在时记录的话，审计表本身就成了一份"哪些邮箱注册过"的探测器 ——
+   * 而审计恰恰是很多人能看到的东西。
+   */
+  USER_PASSWORD_RESET_REQUEST: 'user.password_reset_request',
+  USER_PASSWORD_RESET: 'user.password_reset',
 
   MESSAGE_CREATE: 'message.create',
   MESSAGE_EDIT: 'message.edit',

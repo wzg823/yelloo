@@ -3,11 +3,11 @@
 一个面向中文开发者的**公开技术社区**。内部采用 Discord 式的频道模型（连续消息流 + Thread），
 对外用论坛式的 URL 结构把内容暴露给搜索引擎。
 
-当前状态：**P0 + P1 已完成**，可注册登录、发消息、传附件、实时接收、向上翻历史、搜索、未读角标，
-已装好新人限流（按账号年龄分三级台阶）、消息编辑/删除（含修订历史与审核删帖），
-以及**管理后台**（举报处置、用户禁言/封禁、频道管理、审计日志）。
-P2 剩余项（密码重置）见 [docs/STATUS.md](docs/STATUS.md)；
-产品范围与里程碑见 [docs/PLAN.md](docs/PLAN.md)。
+当前状态：**P0 + P1 + P2 全部完成**，可注册登录、发消息、传附件、实时接收、向上翻历史、
+搜索、未读角标、新人限流、消息编辑/删除、**密码重置**，以及管理后台
+（举报处置、用户禁言/封禁、频道管理、审计日志）。
+**治理能力已齐，可以开放注册**；下一步是 P3 的增长项。
+产品范围与里程碑见 [docs/PLAN.md](docs/PLAN.md)，当前进度详见 [docs/STATUS.md](docs/STATUS.md)。
 
 ---
 
@@ -70,6 +70,7 @@ npm run dev            # → http://localhost:3000
 | `npm run test:trust` | **新人限流策略单元测试**：注入假时钟穷举 10 分钟 / 24 小时边界、配额、员工豁免（不需要数据库） |
 | `npm run test:list` | **消息列表归并单元测试**：去重、乐观认领、变更覆盖（不需要数据库） |
 | `npm run test:admin` | **管理策略单元测试**：防横向提权、时长解析、频道输入（不需要数据库） |
+| `npm run test:reset` | **密码重置令牌单元测试**：熵、一次性、限期、邮箱脱敏（不需要数据库） |
 | `npm run build:image` | **在 WSL 里构建镜像并导出**（低内存服务器的正确做法） |
 | `npm run deploy` | 部署到服务器（**在服务器上执行**，见 [docs/DEPLOY.md](docs/DEPLOY.md) 第 4 节） |
 | `npm run deploy:local -- -Server root@IP` | 从 Windows 本地编排部署（打包上传 + 远程部署 + 验证） |
@@ -140,6 +141,8 @@ Server Action 需要浏览器注入的 `Next-Action` 头，脚本、移动端、
 | `POST /api/read` | 推进已读位点 |
 | `POST /api/auth/register` | 注册（JSON 或表单编码），下发 httpOnly Cookie |
 | `POST /api/auth/login` | 登录 |
+| `POST /api/auth/forgot` | 申请密码重置（**响应不区分邮箱是否存在**，防账号枚举） |
+| `POST /api/auth/reset` | 用邮件里的令牌设置新密码（一次性、30 分钟、改完撤销全部会话） |
 | `POST /api/auth/logout` | 登出，并断开该用户所有 SSE 连接 |
 | `PATCH /api/messages/:id` | 编辑消息（**仅作者本人**，版主也不能改别人的话） |
 | `DELETE /api/messages/:id` | 删除消息（作者删自己的，或有 `MANAGE_MESSAGE` 的人删任何人的） |
@@ -276,9 +279,12 @@ src/
   否则一个被盗的管理员账号能立刻造出第二个管理员，把一次入侵变成永久占领
 - **频道 slug 不可修改**。它是对外 URL 的一部分，改了会让已被收录的链接、
   用户收藏的链接全部 404。要换名字就新建频道再归档旧的
+- **邮件默认不发**（`MAIL_TRANSPORT=log`）。密码重置流程完整可用、令牌照常入库，
+  只是邮件只写进日志。配好通道（file 用于开发、resend 或自建 adapter 用于生产）
+  后同一个流程立刻开始真的发信，代码不用改。在此之前找回密码要走运维命令
+  `scripts/set-password.mjs`
 - forum 类型频道目前与 text 频道行为一致，未做"一帖一帖"的独立 URL（P3）
 - 评论/反应（reactions）只有表结构（P3）
-- 无邮件发送：注册不做邮箱验证，忘记密码流程未实现（P2；运维可用 `scripts/set-password.mjs` 手动重置）
 - 无速率限制的分布式实现：当前是进程内滑动窗口，多实例下额度会乘以实例数（P4）
 - 编辑与删除**不在 SSE 断线补齐范围内**（补齐按 id 增量，而它们不产生新 id）。
   客户端在重连后与降级轮询期间会重取可见窗口来兜住，详见 [docs/EVENTS.md](docs/EVENTS.md) 第 4 节

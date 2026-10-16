@@ -355,7 +355,9 @@ export const auditLogs = pgTable(
   ],
 )
 
-/** 速率限制的持久化兜底（进程内 LRU 是第一道，这里防重启绕过） */
+/**
+ * 速率限制的持久化兜底（进程内 LRU 是第一道，这里防重启绕过）
+ */
 export const rateLimits = pgTable(
   'rate_limits',
   {
@@ -363,6 +365,44 @@ export const rateLimits = pgTable(
     count: integer('count').notNull().default(0),
     windowStart: timestamp('window_start', { withTimezone: true }).notNull().defaultNow(),
   },
+)
+
+/**
+ * 密码重置令牌。
+ *
+ * ── 三条不能省的约定 ────────────────────────────────────────────────
+ *
+ * 1. **只存 token 的 SHA-256，不存 token 本身。**
+ *    与 `sessions` 同一个理由：数据库泄露时，攻击者拿到的是哈希，
+ *    不能直接拿去重置别人的密码。这也意味着**令牌一旦生成就无法再读出**，
+ *    所以邮件必须在那一次请求里发出去，不能"先入库、稍后补发"。
+ *
+ * 2. **一次性 + 限期。** `usedAt` 非空即视为已用尽；`expiresAt` 之后失效。
+ *    校验逻辑在 `src/lib/reset-policy.ts`（纯函数，有单测）。
+ *
+ * 3. **一个用户同时只应有一个有效令牌。** 签发新令牌时会把旧的标记作废
+ *    （见 `createPasswordReset()`）—— 否则用户点三次"发送重置邮件"，
+ *    前两封里的链接依然有效，等于把攻击面乘了三倍。
+ */
+export const passwordResets = pgTable(
+  'password_resets',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    userId: bigint('user_id', { mode: 'number' })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** token 的 SHA-256（hex，64 字符）。唯一索引保证不会撞车 */
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    /** 申请时的来源 IP。多次申请来自同一 IP 是排查滥用的第一条线索 */
+    requestedIp: varchar('requested_ip', { length: 45 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('password_resets_token_key').on(t.tokenHash),
+    index('password_resets_user_idx').on(t.userId, t.createdAt),
+  ],
 )
 
 // ─────────────────────────────────────────────────────────────

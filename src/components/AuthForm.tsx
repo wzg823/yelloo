@@ -91,6 +91,8 @@ export function AuthForm({ mode, next }: { mode: Mode; next?: string }) {
         {isLogin ? (
           <>
             还没有账号？<Link href="/register">注册</Link>
+            {' · '}
+            <Link href="/forgot">忘记密码？</Link>
           </>
         ) : (
           <>

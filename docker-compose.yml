@@ -110,6 +110,12 @@ services:
       # ★ 刻意不写默认值 ★ 未配置时 smoke 会以退出码 2 报配置错误——
       # 若这里给一个默认口令，等于把凭据又放回了仓库（见 scripts/smoke.mjs 注释）。
       SMOKE_PASSWORD: ${SMOKE_PASSWORD:-}
+      # 邮件通道（密码重置）。不配置时默认 log：流程照走、令牌照入库，
+      # 只是不真的发信 —— 这样缺邮件服务不会把"忘记密码"变成一个 500。
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-log}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_API_KEY: ${MAIL_API_KEY:-}
+      MAIL_DIR: ${MAIL_DIR:-/app/var/mail}
     volumes:
       # 附件持久化。将来换对象存储时删掉这一行即可
       - uploads:/app/var/uploads

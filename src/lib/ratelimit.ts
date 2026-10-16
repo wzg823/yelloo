@@ -50,6 +50,20 @@ export const RATE_RULES = {
   editMessage: { windowMs: 5 * 60 * 1000, max: 20 },
   /** 删除比编辑宽松得多：删错了用户要能立刻删对 */
   deleteMessage: { windowMs: 60 * 60 * 1000, max: 60 },
+  /**
+   * 申请密码重置。
+   *
+   * 这个接口会真的发邮件，不限流就是一个免费的骚扰工具，
+   * 还会烧掉邮件服务的额度。3 次/15 分钟对正常用户绰绰有余
+   * （收到邮件、点完就走了）。
+   *
+   * 注意它按 **IP** 计数：同一出口 IP 后面的人会互相影响。
+   * 这里可以接受，因为额度只有 3 次、且失败的代价是"稍后再试"；
+   * 但如果是登录那种高频操作就不行 —— 见 `peek()` 的说明。
+   */
+  forgotPassword: { windowMs: 15 * 60 * 1000, max: 3 },
+  /** 提交新密码。按 IP 计，防的是拿 token 暴力猜测 */
+  resetPassword: { windowMs: 15 * 60 * 1000, max: 10 },
 } satisfies Record<string, RateLimitRule>
 
 export type RateLimitResult = {
