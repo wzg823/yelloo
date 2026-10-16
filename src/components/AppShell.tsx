@@ -173,6 +173,14 @@ export function AppShell({
               <span className="chan-prefix">⌕</span>
               <span className="chan-name">搜索</span>
             </Link>
+            {/* 管理入口只对版主/管理员显示。真正的门在 /admin 的服务端与每个
+                写接口里 —— 这里只是别让普通用户看到点不动的链接 */}
+            {user && (user.role === 'admin' || user.role === 'mod') && (
+              <Link href="/admin" className="chan-link">
+                <span className="chan-prefix">⚑</span>
+                <span className="chan-name">管理后台</span>
+              </Link>
+            )}
           </div>
         </div>
 

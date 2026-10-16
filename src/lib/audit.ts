@@ -17,6 +17,7 @@ export const AUDIT = {
   USER_UNMUTE: 'user.unmute',
   USER_ROLE_GRANT: 'user.role_grant',
   USER_ROLE_REVOKE: 'user.role_revoke',
+  USER_TRUST_SET: 'user.trust_set',
 
   MESSAGE_CREATE: 'message.create',
   MESSAGE_EDIT: 'message.edit',

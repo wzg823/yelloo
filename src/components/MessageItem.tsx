@@ -102,6 +102,10 @@ export function MessageItem({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [reporting, setReporting] = useState(false)
+  const [reportReason, setReportReason] = useState('')
+  const [reportBusy, setReportBusy] = useState(false)
+  const [reportMsg, setReportMsg] = useState<string | null>(null)
 
   const author = message.author
   // 注意：PublicMessage 是"传输形状"，字段一律 snake_case。
@@ -117,6 +121,44 @@ export function MessageItem({
   const canDelete = Boolean(
     !message.is_deleted && onDelete && (isMine || isModeratorRole(viewer?.role)),
   )
+  // 举报：登录了、不是自己的、没被删。不需要任何额外权限 —— 举报是普通用户
+  // 参与治理的唯一入口，门槛高了这个功能就等于不存在
+  const canReport = Boolean(viewer && !isMine && !message.is_deleted)
+
+  const submitReport = useCallback(async () => {
+    if (reportBusy) return
+    setReportBusy(true)
+    setReportMsg(null)
+    try {
+      const res = await fetch('/api/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_type: 'message',
+          message_id: message.id,
+          reason: reportReason,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string
+        deduplicated?: boolean
+      }
+      if (!res.ok) {
+        setReportMsg(data.error ?? `提交失败（${res.status}）`)
+      } else if (data.deduplicated) {
+        // 服务端会把"同一人重复举报"合并，这里如实说明，避免用户以为没提交上
+        setReportMsg('你已经举报过这条消息，我们正在处理')
+        setReporting(false)
+      } else {
+        setReportMsg('已提交，感谢反馈')
+        setReporting(false)
+      }
+    } catch {
+      setReportMsg('网络错误，请重试')
+    } finally {
+      setReportBusy(false)
+    }
+  }, [reportBusy, reportReason, message.id])
 
   const startEdit = useCallback(() => {
     setDraft(message.content_md)
@@ -193,7 +235,7 @@ export function MessageItem({
             #{message.id.slice(-6)}
           </a>
 
-          {!editing && (onReply || canEdit || canDelete) && (
+          {!editing && (onReply || canEdit || canDelete || canReport) && (
             <span className="msg-actions">
               {onReply && !message.is_deleted && (
                 <button type="button" className="icon-btn" onClick={() => onReply(message)}>
@@ -203,6 +245,18 @@ export function MessageItem({
               {canEdit && (
                 <button type="button" className="icon-btn" onClick={startEdit}>
                   编辑
+                </button>
+              )}
+              {canReport && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => {
+                    setReporting((v) => !v)
+                    setReportMsg(null)
+                  }}
+                >
+                  举报
                 </button>
               )}
               {canDelete &&
@@ -288,6 +342,47 @@ export function MessageItem({
         )}
 
         {error && <div className="msg-action-error">{error}</div>}
+
+        {reporting && (
+          <div className="msg-edit">
+            <textarea
+              className="msg-edit-input"
+              rows={2}
+              autoFocus
+              placeholder="请说明这条消息哪里有问题（至少 4 个字）。举报会进入审核队列。"
+              value={reportReason}
+              disabled={reportBusy}
+              onChange={(e) => setReportReason(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setReporting(false)
+                }
+              }}
+            />
+            <div className="msg-edit-bar">
+              <span className="msg-edit-hint">举报人身份不会对被举报人公开</span>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setReporting(false)}
+                disabled={reportBusy}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="icon-btn primary"
+                onClick={submitReport}
+                disabled={reportBusy || reportReason.trim().length < 4}
+              >
+                {reportBusy ? '提交中…' : '提交举报'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {reportMsg && <div className="msg-action-note">{reportMsg}</div>}
 
         {!message.is_deleted && !editing && (
           <AttachmentList items={message.attachments ?? []} />

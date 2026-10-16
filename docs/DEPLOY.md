@@ -504,7 +504,32 @@ docker compose exec -T app node scripts/verify-newuser.mjs
 
 # 附件链路：写入 → 卷 → Caddy 直出 的完整闭环，含魔法数字与响应头
 docker compose exec -T app sh -c 'CADDY_URL=http://caddy node scripts/verify-attachments.mjs'
+
+# 编辑 / 删除：权限边界、修订历史、附件文件真删、搜索不命中
+docker compose exec -T -e CADDY_URL=http://caddy app node scripts/verify-messages.mjs
 ```
+
+### 管理后台的端到端验证
+
+```bash
+# 版主及以下的部分（越权防护、举报闭环、等级关系）
+docker compose exec -T app node scripts/verify-admin.mjs
+
+# 完整跑（含封禁、频道管理这些管理员专属断言）：
+# 凭据从 .env 读出来直接进环境变量，避免留在命令行历史里
+cd /opt/bbs
+set -a; . ./.env; set +a
+docker compose exec -T \
+  -e ADMIN_EMAIL="$SEED_ADMIN_EMAIL" \
+  -e ADMIN_PASSWORD="$SEED_ADMIN_PASSWORD" \
+  app node scripts/verify-admin.mjs
+```
+
+> 不传凭据时脚本会**跳过**管理员专属的断言并记**警告**，而不是静默通过 ——
+> 跳过不等于通过，输出末尾会明确写"有 N 项未覆盖"。
+>
+> 这个脚本会真的封禁再解封 `smokeb`、真的建频道再归档，结束时自动还原。
+> 它留下的东西只有举报单与审计记录。
 
 > **注册限流预算**：注册接口限流为 5 次/小时/IP。
 > `verify-newuser.mjs` 每次运行注册 1 个新账号（新人限流只能对真新账号生效，

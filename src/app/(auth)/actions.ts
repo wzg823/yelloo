@@ -21,7 +21,7 @@ import {
   setSessionCookie,
   SESSION_COOKIE,
 } from '@/lib/session'
-import { RATE_RULES, clientIp, consume } from '@/lib/ratelimit'
+import { RATE_RULES, clientIp, consume, peek } from '@/lib/ratelimit'
 import { AUDIT, audit } from '@/lib/audit'
 
 export type ActionResult =
@@ -64,15 +64,22 @@ export async function registerAction(formData: FormData): Promise<ActionResult> 
 export async function loginAction(formData: FormData): Promise<ActionResult> {
   const h = await headers()
   const ip = clientIp(h)
+  const loginKey = `login:ip:${ip}`
 
-  const limit = consume(`login:ip:${ip}`, RATE_RULES.login)
-  if (!limit.ok) return { ok: false, error: '尝试次数过多，请 15 分钟后再试' }
+  // 与 /api/auth/login 保持一致：**只对失败计数**。
+  // 两边必须同源，否则浏览器走表单登录的人会被限流、走 API 的人不会
+  // （或反之），排查起来完全看不出规律。理由见 API 路由里的说明。
+  const budget = peek(loginKey, RATE_RULES.login)
+  if (!budget.ok) return { ok: false, error: '尝试次数过多，请 15 分钟后再试' }
 
   const result = await authenticate({
     email: String(formData.get('email') ?? ''),
     password: String(formData.get('password') ?? ''),
   })
-  if (!result.ok) return { ok: false, error: result.error }
+  if (!result.ok) {
+    consume(loginKey, RATE_RULES.login)
+    return { ok: false, error: result.error }
+  }
 
   const token = await startSession(result.userId)
   await setSessionCookie(token)

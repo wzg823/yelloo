@@ -29,6 +29,12 @@ export type RateLimitRule = {
 /** 预设规则：注册要最严，发帖次之 */
 export const RATE_RULES = {
   register: { windowMs: 60 * 60 * 1000, max: 5 },
+  /**
+   * 登录。**只对失败尝试计数**（见 `peek()` 的说明）。
+   *
+   * 按"每次请求"计数会让同一个出口 IP 后面的人互相拖累：
+   * 办公室/学校/运营商 NAT 下累计十次登录就会被集体锁 15 分钟。
+   */
   login: { windowMs: 15 * 60 * 1000, max: 10 },
   postMessage: { windowMs: 60 * 1000, max: 10 },
   createThread: { windowMs: 60 * 60 * 1000, max: 10 },
@@ -72,6 +78,32 @@ export function consume(key: string, rule: RateLimitRule): RateLimitResult {
   }
 
   bucket.count += 1
+  return { ok: true, remaining: rule.max - bucket.count, retryAfterMs: bucket.resetAt - now }
+}
+
+/**
+ * 只看额度、**不计数**。
+ *
+ * 用途：把限流从"每次请求都算"改成"只算失败的那些"。
+ * 登录就是这样 —— 见 `src/app/api/auth/login/route.ts`。
+ *
+ * 为什么必须这样做：按 IP 计数时，**成功登录也占额度**，
+ * 于是同一个出口 IP 后面的人（办公室、学校、运营商 NAT）累计登录十次
+ * 就会被集体锁在门外 15 分钟。而每人每天重新登录一次是很正常的操作。
+ *
+ * 语义上正确的做法是：额度只用来限制**失败尝试**（那才是暴力破解的信号）。
+ * 所以先 peek 判断"是否已经透支"，认证失败后才 consume。
+ */
+export function peek(key: string, rule: RateLimitRule): RateLimitResult {
+  const now = Date.now()
+  const bucket = buckets.get(key)
+
+  if (!bucket || bucket.resetAt <= now) {
+    return { ok: true, remaining: rule.max, retryAfterMs: rule.windowMs }
+  }
+  if (bucket.count >= rule.max) {
+    return { ok: false, remaining: 0, retryAfterMs: bucket.resetAt - now }
+  }
   return { ok: true, remaining: rule.max - bucket.count, retryAfterMs: bucket.resetAt - now }
 }
 

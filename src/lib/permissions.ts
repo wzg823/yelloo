@@ -27,6 +27,12 @@ export const PERM = {
    * 已发出的内容随手抹掉（或者反过来）。合成一个位就再也拆不开了。
    */
   DELETE_OWN_MESSAGE: 1n << 13n,
+  /**
+   * 禁言。与 KICK_MEMBER / BAN_MEMBER 分开的理由：
+   * "让他安静一会儿"、"踢出当前会话"、"永久拒绝" 是三种强度完全不同的处置，
+   * 一个社区很可能只愿意把前两者交给版主。合成一位就再也分不开了。
+   */
+  MUTE_MEMBER: 1n << 14n,
   ADMINISTRATOR: 1n << 62n,
 } as const
 
@@ -73,6 +79,8 @@ export function permsForUserRole(role: string): bigint {
         PERM.MANAGE_MESSAGE |
         PERM.MANAGE_REPORT |
         PERM.KICK_MEMBER |
+        // 版主能禁言，但**不能封禁** —— 永久拒绝是站长才承担的责任
+        PERM.MUTE_MEMBER |
         PERM.VIEW_AUDIT_LOG
       )
     default:

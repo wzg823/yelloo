@@ -18,7 +18,8 @@
     "test:list": "node scripts/test-message-list.mjs",
     "deploy": "bash scripts/deploy.sh",
     "deploy:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1",
-    "build:image": "wsl -d Ubuntu -u root -- bash \"/mnt/e/dsh project bbs/scripts/build-image.sh\""
+    "build:image": "wsl -d Ubuntu -u root -- bash \"/mnt/e/dsh project bbs/scripts/build-image.sh\"",
+    "test:admin": "node scripts/test-admin-policy.mjs"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

@@ -4,8 +4,9 @@
 对外用论坛式的 URL 结构把内容暴露给搜索引擎。
 
 当前状态：**P0 + P1 已完成**，可注册登录、发消息、传附件、实时接收、向上翻历史、搜索、未读角标，
-并已装好新人限流（按账号年龄分三级台阶）。
-P2 剩余项（编辑删除、管理后台、举报处置、密码重置）见 [docs/STATUS.md](docs/STATUS.md)；
+已装好新人限流（按账号年龄分三级台阶）、消息编辑/删除（含修订历史与审核删帖），
+以及**管理后台**（举报处置、用户禁言/封禁、频道管理、审计日志）。
+P2 剩余项（密码重置）见 [docs/STATUS.md](docs/STATUS.md)；
 产品范围与里程碑见 [docs/PLAN.md](docs/PLAN.md)。
 
 ---
@@ -68,6 +69,7 @@ npm run dev            # → http://localhost:3000
 | `npm run smoke` | **端到端验证**：注册 → 发消息 → 跨用户实时投递 + 心跳检测（需 `SMOKE_PASSWORD`，见下） |
 | `npm run test:trust` | **新人限流策略单元测试**：注入假时钟穷举 10 分钟 / 24 小时边界、配额、员工豁免（不需要数据库） |
 | `npm run test:list` | **消息列表归并单元测试**：去重、乐观认领、变更覆盖（不需要数据库） |
+| `npm run test:admin` | **管理策略单元测试**：防横向提权、时长解析、频道输入（不需要数据库） |
 | `npm run build:image` | **在 WSL 里构建镜像并导出**（低内存服务器的正确做法） |
 | `npm run deploy` | 部署到服务器（**在服务器上执行**，见 [docs/DEPLOY.md](docs/DEPLOY.md) 第 4 节） |
 | `npm run deploy:local -- -Server root@IP` | 从 Windows 本地编排部署（打包上传 + 远程部署 + 验证） |
@@ -139,6 +141,16 @@ Server Action 需要浏览器注入的 `Next-Action` 头，脚本、移动端、
 | `POST /api/auth/register` | 注册（JSON 或表单编码），下发 httpOnly Cookie |
 | `POST /api/auth/login` | 登录 |
 | `POST /api/auth/logout` | 登出，并断开该用户所有 SSE 连接 |
+| `PATCH /api/messages/:id` | 编辑消息（**仅作者本人**，版主也不能改别人的话） |
+| `DELETE /api/messages/:id` | 删除消息（作者删自己的，或有 `MANAGE_MESSAGE` 的人删任何人的） |
+| `POST /api/reports` | 举报消息或用户（需登录；同一人重复举报会合并） |
+| `GET /api/admin/reports` | 举报队列（`MANAGE_REPORT`） |
+| `POST /api/admin/reports/:id` | 处置举报：结案 / 删消息 / 禁言 / 封禁（各项权限分别校验） |
+| `GET /api/admin/users` | 用户列表（`MUTE_MEMBER`，全站唯一成批展示邮箱的接口） |
+| `PATCH /api/admin/users/:id` | 禁言 / 封禁 / 改角色 / 改信任等级 |
+| `GET·POST /api/admin/channels` | 频道列表（含归档）/ 新建（`MANAGE_CHANNEL`，仅管理员） |
+| `PATCH /api/admin/channels/:id` | 改名、话题、排序、归档（**不提供删除**，见下） |
+| `GET /api/admin/audit` | 审计日志（`VIEW_AUDIT_LOG`，只读） |
 
 ---
 
@@ -254,10 +266,16 @@ src/
 
 这些是**有意为之**的取舍，不是遗漏：
 
-- 举报、封禁、审计日志只有表与工具函数，没有管理界面（P2）
 - 删除是**不可逆**的：正文在库里清空、附件文件从卷里删掉，`MESSAGE_RESTORE`
   只能恢复成一条空消息。删除前的最后版本会留在 `message_edits`（管理侧可查），
   所以"处置留痕"与"用户真的删掉了"这两件事可以同时成立
+- **不提供删除频道**。频道有消息后就有历史价值，而且外键是 `onDelete: cascade`，
+  物理删除会连带删掉该频道全部消息与修订历史。要"删"就归档：从侧栏消失、
+  不能再发帖，但内容仍可访问、仍可被收录
+- **不提供把某人提升为管理员**的界面。那必须走带外手段（`scripts/promote.mjs`），
+  否则一个被盗的管理员账号能立刻造出第二个管理员，把一次入侵变成永久占领
+- **频道 slug 不可修改**。它是对外 URL 的一部分，改了会让已被收录的链接、
+  用户收藏的链接全部 404。要换名字就新建频道再归档旧的
 - forum 类型频道目前与 text 频道行为一致，未做"一帖一帖"的独立 URL（P3）
 - 评论/反应（reactions）只有表结构（P3）
 - 无邮件发送：注册不做邮箱验证，忘记密码流程未实现（P2；运维可用 `scripts/set-password.mjs` 手动重置）
