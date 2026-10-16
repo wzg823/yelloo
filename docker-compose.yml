@@ -1,0 +1,190 @@
+# ─────────────────────────────────────────────────────────────────────────
+# 单机部署编排。
+#
+# 取舍说明（为什么不用托管数据库/Redis）：
+#   本项目当前形态不需要 Redis —— 实时推送是进程内扇出，SSE 补齐走 Postgres。
+#   单机跑 Postgres 的代价是"备份要自己做"，已由 scripts/backup.sh 覆盖。
+#   等到需要水平扩展时，改动点只有两处（见 Hub 文件头注释），届时再引入
+#   Postgres LISTEN/NOTIFY 或外部数据库，不影响应用代码结构。
+#
+# 中国大陆部署注意：
+#   - 域名必须先完成 ICP 备案，否则 80/443 会被阻断
+#   - 若使用国内云主机，安全组只需放行 80/443，不要暴露 3000/5432
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bbs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      POSTGRES_DB: ${POSTGRES_DB:-bbs}
+      # 中文排序与大小写：C 排序在 LIKE/索引上的行为更可预测
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 不映射端口到宿主机：应用通过 compose 内网访问，减少攻击面。
+    # 需要在宿主机上用 psql 调试时，临时执行：
+    #   docker compose exec postgres psql -U bbs -d bbs
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-bbs} -d ${POSTGRES_DB:-bbs}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command:
+      # ★ 内存参数按机器规格调，通过 .env 覆盖，不要在这里硬编码 ★
+      #
+      # 经验值：shared_buffers ≈ 内存的 15~25%，effective_cache_size ≈ 50~75%。
+      # 默认值面向 2C4G 机器。1.5~2GB 的小机器必须下调，
+      # 否则 Postgres + 应用 + Caddy 会一起把内存吃光（然后 OOM）。
+      #
+      # 覆盖方式（写进 .env）：
+      #   PG_SHARED_BUFFERS=96MB
+      #   PG_EFFECTIVE_CACHE_SIZE=256MB
+      #   PG_WORK_MEM=4MB
+      #   PG_MAX_CONNECTIONS=50
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-768MB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      # 慢查询留痕。上线初期靠它发现缺索引的地方，比事后猜测有效得多
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - log_line_prefix=%m [%p] %q%u@%d
+
+  app:
+    # ★ 显式固定镜像名 ★
+    #
+    # 不加 `image:` 时 compose 会按**项目目录名**推导标签
+    # （/opt/bbs 下是 bbs-app，~/bbs-build 下是 bbs-build-app）。
+    # 这会让"本地构建 → 传到服务器 docker load"的流程失效：
+    # 镜像是 build 出来的名字，而服务器上的 compose 找的是另一个名字，
+    # 表现为服务起不来或用了旧镜像，且报错信息完全不指向真正原因。
+    #
+    # 固定成 bbs-* 后，本地构建、导出、服务器加载三处的标签一致。
+    image: bbs-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # build args：NEXT_PUBLIC_* 变量在构建期内联，运行时 environment 无效
+      args:
+        NEXT_PUBLIC_SITE_NAME: ${SITE_NAME:-技术社区}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # 容器内走 compose 网络的服务名，不是 127.0.0.1
+      DATABASE_URL: postgres://${POSTGRES_USER:-bbs}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-bbs}
+      # 覆盖 SSL 决策。留空 = 自动判断（内网主机名 → off，公网/云库 → on）。
+      # 仅当自动判断不符合实际时才需要显式设置。
+      DATABASE_SSL: ${DATABASE_SSL:-}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
+      SITE_URL: ${SITE_URL:?SITE_URL 必须设置为已备案的 https 域名}
+      SITE_NAME: ${SITE_NAME:-技术社区}
+      NEXT_PUBLIC_SITE_NAME: ${SITE_NAME:-技术社区}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET 必须设置}
+      # 留空 = 跟随 NODE_ENV（生产为 true，正确默认）。
+      # 仅纯 HTTP 验证环境（SSH 隧道 + http://localhost）需要设为 false，
+      # 否则浏览器不发送 Secure Cookie，表现为"登录后立刻又变未登录"。
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+      SNOWFLAKE_EPOCH: ${SNOWFLAKE_EPOCH:-1704067200000}
+      SNOWFLAKE_WORKER_ID: ${SNOWFLAKE_WORKER_ID:-1}
+      UPLOAD_DIR: ${UPLOAD_DIR:-/app/var/uploads}
+      UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-8388608}
+      SSE_HEARTBEAT_MS: '25000'
+      SSE_MAX_CONNS_PER_USER: '3'
+      SSE_MAX_BACKLOG: '500'
+      # 端到端验证脚本（scripts/smoke.mjs）用的固定测试账号口令。
+      # ★ 刻意不写默认值 ★ 未配置时 smoke 会以退出码 2 报配置错误——
+      # 若这里给一个默认口令，等于把凭据又放回了仓库（见 scripts/smoke.mjs 注释）。
+      SMOKE_PASSWORD: ${SMOKE_PASSWORD:-}
+    volumes:
+      # 附件持久化。将来换对象存储时删掉这一行即可
+      - uploads:/app/var/uploads
+    # 同样不映射端口：只有 Caddy 需要访问它
+    expose:
+      - '3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:3000/api/health >/dev/null || exit 1']
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  # 一次性任务：执行数据库迁移。用 profiles 隔离，
+  # 避免 `docker compose up` 时被当成常驻服务。
+  # 用法：docker compose run --rm migrate
+  migrate:
+    image: bbs-migrate
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ['tools']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-bbs}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-bbs}
+      DATABASE_SSL: ${DATABASE_SSL:-}
+      SNOWFLAKE_EPOCH: ${SNOWFLAKE_EPOCH:-1704067200000}
+    command: ['node', 'scripts/migrate.mjs']
+
+  # 种子数据（分类/频道/内置角色/首个管理员）
+  seed:
+    image: bbs-seed
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ['tools']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-bbs}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-bbs}
+      DATABASE_SSL: ${DATABASE_SSL:-}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      SEED_ADMIN_HANDLE: ${SEED_ADMIN_HANDLE:-admin}
+    command: ['node', 'scripts/seed.mjs']
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    environment:
+      # Caddyfile 里用 {$SITE_ADDRESS} 引用。它同时决定 TLS 行为：
+      #   域名      → 自动申请 Let's Encrypt 证书（生产）
+      #   :80       → 纯 HTTP，不启用 TLS（无域名的验证机 / SSH 隧道调试）
+      # 未设置 SITE_ADDRESS 时回退到 DOMAIN，避免老配置失效。
+      SITE_ADDRESS: ${SITE_ADDRESS:-${DOMAIN:?SITE_ADDRESS 或 DOMAIN 必须设置}}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # 只读挂载附件目录，让 Caddy 直接分发上传的文件。
+      # 目的：把附件流量从 Node 进程里摘出去——一个大文件下载不应占用
+      # 应用的事件循环。应用写入的文件必须是 world-readable（0600 会导致 403）。
+      - uploads:/srv/uploads:ro
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:

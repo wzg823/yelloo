@@ -1,0 +1,66 @@
+{
+  "categories": [
+    { "name": "综合", "slug": "general", "description": "日常交流与社区公告", "position": 0 },
+    { "name": "技术", "slug": "tech", "description": "讨论与问答", "position": 10 },
+    { "name": "运营", "slug": "ops", "description": "站务与反馈", "position": 20 }
+  ],
+  "channels": [
+    {
+      "slug": "announcements",
+      "name": "公告",
+      "category": "ops",
+      "type": "announce",
+      "readOnly": true,
+      "topic": "社区规则与站点公告",
+      "position": 0
+    },
+    {
+      "slug": "general-chat",
+      "name": "闲聊",
+      "category": "general",
+      "type": "text",
+      "topic": "随便聊，但保持友善",
+      "position": 10
+    },
+    {
+      "slug": "help",
+      "name": "求助",
+      "category": "tech",
+      "type": "text",
+      "topic": "遇到问题就发这里，附上错误信息和复现步骤",
+      "position": 20
+    },
+    {
+      "slug": "frontend",
+      "name": "前端",
+      "category": "tech",
+      "type": "text",
+      "topic": "浏览器、框架、工程化",
+      "position": 30
+    },
+    {
+      "slug": "backend",
+      "name": "后端",
+      "category": "tech",
+      "type": "text",
+      "topic": "服务端、数据库、分布式",
+      "position": 40
+    },
+    {
+      "slug": "showcase",
+      "name": "作品分享",
+      "category": "general",
+      "type": "forum",
+      "topic": "一人一帖，展示你的项目",
+      "position": 15
+    },
+    {
+      "slug": "feedback",
+      "name": "站点反馈",
+      "category": "ops",
+      "type": "forum",
+      "topic": "功能建议与问题反馈",
+      "position": 10
+    }
+  ]
+}

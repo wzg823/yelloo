@@ -1,0 +1,149 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Caddy 反向代理。
+#
+# Caddy 在这一点上比 Nginx 省事得多：它会自动申请并续期 Let's Encrypt 证书，
+# 不需要手写 certbot 的 cron。
+#
+# ★ 中国大陆部署前置条件 ★
+#   域名必须已完成 ICP 备案。未备案域名解析到大陆服务器时，
+#   80/443 会被运营商阻断，Caddy 的 ACME 校验也会失败（表现为证书一直申请不到）。
+#   若暂时无法备案，只能用境外服务器 + 此配置，无需改动。
+#
+# ★ SSE 的关键配置 ★
+#   /api/events 是长连接。以下两点缺一不可，否则表现为"消息要等几十秒才出现"：
+#     1. encode gzip 必须排除 text/event-stream（压缩会引入缓冲）
+#     2. flush_interval -1 关闭响应缓冲（立即刷出每个 chunk）
+# ─────────────────────────────────────────────────────────────────────────
+
+{
+	# 生产环境务必开启，否则 ACME 失败时很难定位
+	log {
+		output stderr
+		level INFO
+	}
+
+	# 管理端点仅监听 localhost
+	admin 127.0.0.1:2019
+
+	servers {
+		# 允许较长的空闲时间，避免慢客户端被过早断开
+		timeouts {
+			idle 5m
+		}
+	}
+}
+
+# ★ 站点地址由 SITE_ADDRESS 决定，它同时控制 TLS 行为 ★
+#
+#   SITE_ADDRESS=bbs.example.com   → Caddy 自动申请并续期 Let's Encrypt 证书
+#                                    （生产环境用这个；需域名已备案且解析到本机）
+#   SITE_ADDRESS=:80               → **纯 HTTP，完全不启用 TLS**
+#                                    用于：没有域名的验证机、SSH 隧道调试、内网部署
+#
+# 为什么要有 :80 这个选项：当站点地址是 localhost 之类的非公网名字时，
+# Caddy 会走"内部 CA 签发自签证书 + 强制 HTTP→HTTPS 跳转"，
+# 结果是通过隧道访问时浏览器每次都弹证书警告，开发和验证体验很差。
+# 明确写 :80 会关掉整个 TLS 流程，直接明文服务——此时没有证书、没有跳转、没有警告。
+#
+# ⚠️ 一旦有了真实域名和备案，**必须**把 SITE_ADDRESS 改回域名，
+#    否则会话 Cookie 与登录凭证会在明文链路上传输。
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	# 安全响应头。
+	# 注意 CSP 的取舍：Next.js 的水合脚本需要 'unsafe-inline'，
+	# 因此在骨架阶段先给出可用配置，后续接入 nonce 方案再收紧。
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# ── 实时事件流：必须最先匹配，且不压缩、不缓冲 ──────────────────
+	handle /api/events* {
+		reverse_proxy app:3000 {
+			# 关闭缓冲：每个事件立即送达浏览器
+			flush_interval -1
+
+			# SSE 不需要压缩。显式清空 Accept-Encoding 可以让上游
+			# 完全跳过压缩逻辑，比依赖 encode 指令的排除更可靠。
+			header_up Accept-Encoding "identity"
+
+			# 读超时置 0：流式响应没有"读完成"这一时刻，
+			# 设了超时会在长连接上定期被误杀。
+			transport http {
+				read_timeout 0
+				write_timeout 0
+				dial_timeout 5s
+			}
+
+			health_uri /api/health
+			health_interval 30s
+		}
+	}
+
+	# ── 健康检查：不记日志，避免刷满磁盘 ────────────────────────────
+	handle /api/health {
+		reverse_proxy app:3000
+	}
+	log_skip /api/health
+
+	# ── 上传文件直出 ───────────────────────────────────────────────
+	# 目前附件落本地卷。换对象存储后应改成 302 到预签名 URL，
+	# 让流量绕开应用进程。路径中带 /_uploads/ 前缀是为了将来
+	# 不与应用路由冲突。
+	#
+	# ★ 语法提醒：`file_server` 只接受 hide/browse/pass_thru/precompressed
+	#   等子指令，**不接受 `header`**。所有 header 必须写在 handle_path 块内、
+	#   与 file_server 同级，否则 Caddy 会拒绝加载配置并以重启循环收场
+	#   （表现为 80/443 完全没有监听）。改动本文件后务必执行：
+	#       docker compose run --rm --no-deps --entrypoint caddy caddy \
+	#         validate --config /etc/caddy/Caddyfile --adapter caddyfile
+	handle_path /_uploads/* {
+		root * /srv/uploads
+
+		# 附件内容不可变（文件名是随机 hex），可长缓存
+		header Cache-Control "public, max-age=31536000, immutable"
+
+		# 禁止浏览器嗅探类型：让浏览器严格按 Content-Type 处理。
+		# 这是允许下面 inline 的前提条件之一。
+		header X-Content-Type-Options "nosniff"
+
+		# ★ 为什么可以用 inline（而不是强制 attachment）★
+		#
+		# inline 是必要的：图片缩略图靠 <img src> 渲染，强制 attachment
+		# 会让所有缩略图失效（<img> 无法显示一个"下载"响应）。
+		#
+		# 它之所以安全，靠的是**应用层的两道限制**，而不是这里的头：
+		#   1. src/lib/storage.ts 的扩展名白名单**不含** .html / .svg / .js
+		#      —— 这些恰恰是能内联执行脚本的类型，而 SVG 尤其危险
+		#      （<svg><script> 与站点同源时会成为存储型 XSS）
+		#   2. 白名单里的类型都由 Caddy 按扩展名给出正确的 Content-Type，
+		#      配合 nosniff，浏览器不会把它们当脚本执行
+		#
+		# ⚠️ 因此：**往白名单里加类型前必须重新评估这条推理。**
+		#    一旦放行 .html / .svg / .js / .mhtml，就必须把这里改成 attachment。
+		header Content-Disposition "inline"
+
+		file_server
+	}
+
+	# ── 其余全部交给应用 ───────────────────────────────────────────
+	handle {
+		reverse_proxy app:3000 {
+			# Next.js 的静态产物带内容哈希，可长缓存；
+			# 这里不细分配置，交给应用自身的 Cache-Control
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+				dial_timeout 5s
+			}
+
+			health_uri /api/health
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+}

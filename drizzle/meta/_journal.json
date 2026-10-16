@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1792072825009,
+      "tag": "0000_warm_major_mapleleaf",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792072826000,
+      "tag": "0001_search_trgm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792084714055,
+      "tag": "0002_attachments_message_id_not_null",
+      "breakpoints": true
+    }
+  ]
+}

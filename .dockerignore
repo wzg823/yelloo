@@ -1,0 +1,42 @@
+# 构建上下文排除项。
+#
+# 这个文件不只是"让构建快一点"：**必须在镜像里排除 .env**，
+# 否则本地的数据库密码、SESSION_SECRET 会被打进镜像层，
+# 任何能拉取镜像的人都能读到（docker history / 解包镜像层均可提取）。
+
+node_modules
+.next
+out
+build
+dist
+
+# 机密：绝不进镜像
+.env
+.env.*
+!.env.example
+
+# 本地上传目录：绝不进镜像。
+# 容器里由 compose 的 uploads 命名卷提供，镜像内的空目录只是兜底。
+var
+data
+backups
+*.sql.gz
+*.dump
+
+# 版本控制与编辑器
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+
+# 文档与脚本产物
+*.tsbuildinfo
+next-env.d.ts
+README.md
+docs
