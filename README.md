@@ -257,6 +257,7 @@ src/
 
 | 文档 | 内容 |
 |---|---|
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | **项目总览**：技术栈、功能清单、架构要点、进度、质量保障、风险与下一步 |
 | [docs/STATUS.md](docs/STATUS.md) | **进度报告**：当前完成度、线上快照、风险、下一步 |
 | [docs/PLAN.md](docs/PLAN.md) | 产品范围、里程碑、后续优先级、风险 |
 | [docs/DB.md](docs/DB.md) | 数据模型逐表说明、索引与查询模式、扩容思考 |
