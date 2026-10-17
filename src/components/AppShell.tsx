@@ -18,6 +18,7 @@ import { usePathname } from 'next/navigation'
 import { useCallback, useEffect, useState } from 'react'
 import { useSession } from '@/lib/session-context'
 import { avatarHue, initials } from '@/lib/format'
+import { ThemeToggle } from './ThemeToggle'
 import { logoutAction } from '@/app/(auth)/actions'
 import type { ChannelSummary } from '@/lib/queries'
 
@@ -212,21 +213,30 @@ export function AppShell({
                   </div>
                 </div>
               </div>
-              <form action={logoutAction}>
-                <button type="submit" className="icon-btn" title="退出登录">
-                  退出
-                </button>
-              </form>
+              <div className="sidebar-footer-actions">
+                <ThemeToggle />
+                <form action={logoutAction}>
+                  <button type="submit" className="icon-btn" title="退出登录">
+                    退出
+                  </button>
+                </form>
+              </div>
             </>
           ) : (
-            <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-              <Link href="/login" className="btn btn-ghost" style={{ flex: 1, textAlign: 'center' }}>
-                登录
-              </Link>
-              <Link href="/register" className="btn btn-primary" style={{ flex: 1, textAlign: 'center' }}>
-                注册
-              </Link>
-            </div>
+            <>
+              <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+                <Link href="/login" className="btn btn-ghost" style={{ flex: 1, textAlign: 'center' }}>
+                  登录
+                </Link>
+                <Link href="/register" className="btn btn-primary" style={{ flex: 1, textAlign: 'center' }}>
+                  注册
+                </Link>
+              </div>
+              {/* 游客也能切主题：公开社区的第一屏留给访客，配色偏好不该要求先注册 */}
+              <div className="sidebar-footer-actions">
+                <ThemeToggle />
+              </div>
+            </>
           )}
         </div>
       </nav>

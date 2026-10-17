@@ -57,6 +57,13 @@
 | 权限位系统（bigint 位域）+ 审计日志 + 速率限制 | ✅ |
 | 中文可用搜索（pg_trgm） | ✅ |
 | 健康检查 | ✅ |
+| **深色 / 浅色主题**（跟随系统 + 用户切换，服务端渲染无闪白） | ✅ |
+
+> 主题的实现在 `src/lib/theme.ts` + `src/components/ThemeToggle.tsx`，配色用
+> CSS 的 `light-dark()`：同一个变量的两档取值写在一行，**不可能出现"改了深色
+> 忘了改浅色"**。选择存 Cookie（不是 localStorage），服务端渲染时直接落成
+> `<html data-theme>`，所以第一帧就是对的 —— 夜里打开页面不会被闪一记白光。
+> 未选择时不写这个属性，交给 `color-scheme: light dark` 跟随系统。
 
 ### P2 中已完成的四项
 

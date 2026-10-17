@@ -22,7 +22,7 @@
 | 实时扇出 | 进程内 Map | 单实例够用。扩展路径见下文，**不需要引入 Redis** |
 | 密码 | argon2id（`@node-rs/argon2`） | 预编译二进制，Docker 构建不需要编译工具链 |
 | 反向代理 | Caddy | 自动 HTTPS，SSE 配置只有两行 |
-| 样式 | 原生 CSS | 骨架阶段零构建配置，`next build` 少一个失败点 |
+| 样式 | 原生 CSS | 骨架阶段零构建配置，`next build` 少一个失败点；配色用 `light-dark()` 一份定义管两套主题 |
 
 **刻意没引入的东西**：Redis、Kafka、Elasticsearch、K8s、GraphQL、Tailwind、状态管理库。
 在单机 + 万级用户之前，它们都只是负债。

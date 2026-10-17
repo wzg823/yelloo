@@ -16,6 +16,7 @@ import { notFound, redirect } from 'next/navigation'
 import { getCurrentUser } from '@/lib/session'
 import { PERM, hasPerm } from '@/lib/permissions'
 import { countOpenReports } from '@/lib/admin-queries'
+import { ThemeToggle } from '@/components/ThemeToggle'
 
 export const dynamic = 'force-dynamic'
 
@@ -55,6 +56,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <Link href="/" className="admin-nav-link">
             ← 回到社区
           </Link>
+          <ThemeToggle />
           <div className="admin-muted">
             {user.handle} · {user.role}
           </div>

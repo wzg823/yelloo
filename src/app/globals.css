@@ -8,31 +8,118 @@
  * 若后续团队规模扩大，可平滑迁移到 Tailwind（类名结构已按组件划分）。
  */
 
+/**
+ * ── 两套配色 ──────────────────────────────────────────────────────
+ *
+ * 用 `light-dark(亮, 暗)` 而不是维护两份变量表：同一个变量的两个值写在
+ * 同一行，**不可能出现"改了深色忘了改浅色"**。它由 `color-scheme` 决定
+ * 取哪一侧 —— 于是"跟随系统"是天生的：不设 `color-scheme` 就是 light dark，
+ * 浏览器按系统偏好选；用户在页面上选了主题，就由 `data-theme` 钉死。
+ *
+ * 浅色配色参考 Claude 网页版：暖白底（象牙白而非纯白）、暖灰侧栏、
+ * 近黑的暖色文字、橙调强调色。纯白会让长时间阅读发刺，暖白不会。
+ *
+ * 每个变量都先写一遍深色字面值再写 `light-dark()`：不支持 `light-dark()`
+ * 的旧浏览器会用到第一行（退化为只有深色），而不会因为取值无效变成
+ * 全站无样式 —— 那比"只有深色"糟得多。
+ */
 :root {
+  /* 缺省跟随系统；下面两个 data-theme 规则可以把它钉死 */
+  color-scheme: light dark;
+
   --bg-app: #1a1b1e;
+  --bg-app: light-dark(#faf9f5, #1a1b1e);
   --bg-sidebar: #121316;
+  --bg-sidebar: light-dark(#f0eee6, #121316);
   --bg-panel: #232428;
+  --bg-panel: light-dark(#ffffff, #232428);
   --bg-raised: #2b2d31;
+  --bg-raised: light-dark(#f5f3ec, #2b2d31);
   --bg-input: #1e1f22;
+  --bg-input: light-dark(#ffffff, #1e1f22);
   --bg-hover: #35373c;
+  --bg-hover: light-dark(#e9e6dc, #35373c);
   --bg-active: #404249;
+  --bg-active: light-dark(#dcd8cb, #404249);
+  /* 消息行的鼠标悬停：深色下是极淡的白，浅色下是极淡的暖灰 */
+  --row-hover: rgba(255, 255, 255, 0.02);
+  --row-hover: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.02));
 
   --text-primary: #f2f3f5;
+  --text-primary: light-dark(#262625, #f2f3f5);
   --text-secondary: #b5bac1;
+  --text-secondary: light-dark(#4f4d47, #b5bac1);
   --text-muted: #80848e;
+  --text-muted: light-dark(#6c6a63, #80848e);
   --text-link: #00a8fc;
+  --text-link: light-dark(#a8462a, #00a8fc);
 
   --border: #2e3035;
+  --border: light-dark(#e3e0d5, #2e3035);
+  /* Claude 的橙调。深色下用更亮的一档，浅色下用更深的一档，保证两边都够对比 */
   --accent: #5865f2;
+  --accent: light-dark(#b8502f, #5865f2);
   --accent-hover: #4752c4;
+  --accent-hover: light-dark(#9c3f22, #4752c4);
   --danger: #da373c;
+  --danger: light-dark(#b3352b, #da373c);
   --success: #23a55a;
+  --success: light-dark(#1d7a43, #23a55a);
   --warning: #f0b232;
+  --warning: light-dark(#8a6100, #f0b232);
+
+  /* 语义色补充：这些原先散落在规则里以字面值出现，浅色下会读不清 */
+  --on-accent: #fff;
+  --danger-text: #f08a8d;
+  --danger-text: light-dark(#a8281f, #f08a8d);
+  --danger-strong: #e5484d;
+  --danger-strong: light-dark(#b3352b, #e5484d);
+  --ok-text: #5fd68a;
+  --ok-text: light-dark(#1a6b3c, #5fd68a);
+  --ok-border: #3f9c63;
+  --ok-border: light-dark(#2f7d4a, #3f9c63);
+  --warn-text: #e0b64f;
+  --warn-text: light-dark(#7d5a00, #e0b64f);
+  --warn-border: #b58b2a;
+  --warn-border: light-dark(#a8811f, #b58b2a);
+  --notice-text: #f0c674;
+  --notice-text: light-dark(#7a5a06, #f0c674);
+  --accent-text: #a5adf5;
+  --accent-text: light-dark(#7a3fb8, #a5adf5);
+  --role-mod: #6bb8ff;
+  --role-mod: light-dark(#1c5f9e, #6bb8ff);
+  --role-admin: #f0b232;
+  --role-admin: light-dark(#8a6100, #f0b232);
+
+  --code-bg: #16171a;
+  --code-bg: light-dark(#f5f3ec, #16171a);
+  --code-text: #d6deeb;
+  --code-text: light-dark(#2f2e2b, #d6deeb);
+  --code-inline-text: #e3b341;
+  --code-inline-text: light-dark(#8a5a00, #e3b341);
+  --scrollbar-thumb: #1a1b1e;
+  --scrollbar-thumb: light-dark(#d5d1c4, #1a1b1e);
+  --scrollbar-thumb-hover: #141518;
+  --scrollbar-thumb-hover: light-dark(#c2bdad, #141518);
 
   --radius: 8px;
   --radius-sm: 4px;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
     'Liberation Mono', monospace;
+}
+
+/**
+ * 用户在页面上做的选择 —— 由 `src/lib/theme.ts` 写进 Cookie，
+ * 服务端渲染时读出来直接落到 `<html data-theme>` 上，**不产生闪白**。
+ *
+ * 只覆写 `color-scheme`，不重复定义任何颜色：所有颜色都从上面那套
+ * `light-dark()` 里派生，这正是"只有一处真相"的好处。
+ */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
 }
 
 * {
@@ -161,7 +248,7 @@ a:hover {
 .chan-link .chan-badge {
   margin-left: auto;
   background: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 700;
   border-radius: 999px;
@@ -226,7 +313,7 @@ a:hover {
 }
 .stream-status.live {
   background: rgba(35, 165, 90, 0.12);
-  color: #5fd68a;
+  color: var(--ok-text);
 }
 .stream-status.connecting {
   background: rgba(240, 178, 50, 0.12);
@@ -234,11 +321,11 @@ a:hover {
 }
 .stream-status.polling {
   background: rgba(88, 101, 242, 0.15);
-  color: #a5adf5;
+  color: var(--accent-text);
 }
 .stream-status.offline {
   background: rgba(218, 55, 60, 0.12);
-  color: #f08a8d;
+  color: var(--danger-text);
 }
 .stream-status .dot {
   width: 6px;
@@ -281,7 +368,7 @@ a:hover {
   gap: 4px;
 }
 .msg:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--row-hover);
 }
 .msg.is-pending {
   opacity: 0.55;
@@ -300,7 +387,7 @@ a:hover {
   justify-content: center;
   font-weight: 600;
   font-size: 14px;
-  color: #fff;
+  color: var(--on-accent);
   flex: none;
   overflow: hidden;
   user-select: none;
@@ -323,10 +410,10 @@ a:hover {
   font-size: 15px;
 }
 .msg-author.role-mod {
-  color: #6bb8ff;
+  color: var(--role-mod);
 }
 .msg-author.role-admin {
-  color: #f0b232;
+  color: var(--role-admin);
 }
 .msg-time {
   font-size: 11px;
@@ -414,7 +501,7 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
-  background: #16171a;
+  background: var(--code-bg);
 }
 .code-head {
   display: flex;
@@ -434,7 +521,7 @@ a:hover {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.55;
-  color: #d6deeb;
+  color: var(--code-text);
   tab-size: 2;
 }
 .inline-code {
@@ -444,7 +531,7 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: 3px;
   padding: 1px 5px;
-  color: #e3b341;
+  color: var(--code-inline-text);
 }
 
 /* ── 发帖框 ─────────────────────────────────────────────────── */
@@ -497,7 +584,7 @@ a:hover {
   gap: 8px;
 }
 .composer-error {
-  color: #f08a8d;
+  color: var(--danger-text);
   font-size: 12px;
   padding: 0 14px 8px;
 }
@@ -514,7 +601,7 @@ a:hover {
 }
 .btn-primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -607,7 +694,7 @@ a:hover {
 .form-error {
   background: rgba(218, 55, 60, 0.12);
   border: 1px solid rgba(218, 55, 60, 0.4);
-  color: #f08a8d;
+  color: var(--danger-text);
   border-radius: var(--radius-sm);
   padding: 8px 11px;
   font-size: 13px;
@@ -698,12 +785,13 @@ a:hover {
   border-radius: var(--radius);
   padding: 12px 14px;
   font-size: 13px;
-  color: #f0c674;
+  color: var(--notice-text);
   margin-bottom: 24px;
 }
 .notice code {
   font-family: var(--font-mono);
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
   padding: 1px 5px;
   border-radius: 3px;
 }
@@ -712,7 +800,7 @@ a:hover {
 
 .sidebar-unread-total {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 700;
   border-radius: 999px;
@@ -878,16 +966,16 @@ a:hover {
 }
 /* 危险操作（删除）—— 用颜色区分，避免误点 */
 .icon-btn.danger:hover {
-  background: color-mix(in srgb, #e5484d 18%, transparent);
-  color: #ff8b8f;
+  background: color-mix(in srgb, var(--danger-strong) 18%, transparent);
+  color: var(--danger-text);
 }
 .icon-btn.primary {
-  color: var(--accent, #5b8def);
+  color: var(--accent);
   font-weight: 600;
 }
 .icon-btn.primary:hover {
-  background: color-mix(in srgb, var(--accent, #5b8def) 18%, transparent);
-  color: var(--accent, #5b8def);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
 
 /* ── 消息操作（编辑 / 删除）───────────────────────────────────── */
@@ -923,7 +1011,7 @@ a:hover {
 }
 .msg-edit-input:focus {
   outline: none;
-  border-color: var(--accent, #5b8def);
+  border-color: var(--accent);
 }
 .msg-edit-bar {
   display: flex;
@@ -939,7 +1027,7 @@ a:hover {
 .msg-action-error {
   margin-top: 6px;
   font-size: 12px;
-  color: #ff8b8f;
+  color: var(--danger-text);
 }
 .msg-action-note {
   margin-top: 6px;
@@ -985,8 +1073,8 @@ a:hover {
 }
 .admin-badge {
   margin-left: auto;
-  background: #e5484d;
-  color: #fff;
+  background: var(--danger-strong);
+  color: var(--on-accent);
   border-radius: 9px;
   padding: 0 6px;
   font-size: 11px;
@@ -1019,12 +1107,12 @@ a:hover {
   font-size: 12px;
 }
 .admin-ok {
-  color: #4ec97a;
+  color: var(--ok-text);
   font-size: 12px;
   margin-top: 6px;
 }
 .admin-error {
-  color: #ff8b8f;
+  color: var(--danger-text);
   font-size: 12px;
   margin-top: 4px;
 }
@@ -1049,7 +1137,7 @@ a:hover {
   color: inherit;
 }
 .admin-stat.alert {
-  border-color: #e5484d;
+  border-color: var(--danger-strong);
 }
 .admin-stat-n {
   font-size: 26px;
@@ -1085,7 +1173,7 @@ a:hover {
 }
 .admin-tab.active,
 .admin-chip.active {
-  border-color: var(--accent, #5b8def);
+  border-color: var(--accent);
   color: var(--text-primary);
 }
 .admin-chip-n {
@@ -1142,30 +1230,30 @@ a:hover {
   margin-right: 4px;
 }
 .admin-tag.open {
-  border-color: #e5484d;
-  color: #ff8b8f;
+  border-color: var(--danger-strong);
+  color: var(--danger-text);
 }
 .admin-tag.resolved,
 .admin-tag.active {
-  border-color: #3f9c63;
-  color: #6fd39a;
+  border-color: var(--ok-border);
+  color: var(--ok-text);
 }
 .admin-tag.dismissed,
 .admin-tag.muted {
-  border-color: #b58b2a;
-  color: #e0b64f;
+  border-color: var(--warn-border);
+  color: var(--warn-text);
 }
 .admin-tag.banned {
-  border-color: #e5484d;
-  color: #ff8b8f;
+  border-color: var(--danger-strong);
+  color: var(--danger-text);
 }
 .admin-tag.role-admin {
-  border-color: #e5484d;
-  color: #ff8b8f;
+  border-color: var(--danger-strong);
+  color: var(--danger-text);
 }
 .admin-tag.role-mod {
-  border-color: #5b8def;
-  color: #8fb2ff;
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 .admin-table {
@@ -1217,13 +1305,13 @@ a:hover {
   cursor: default;
 }
 .admin-btn.primary {
-  border-color: var(--accent, #5b8def);
-  color: var(--accent, #5b8def);
+  border-color: var(--accent);
+  color: var(--accent);
   font-weight: 600;
 }
 .admin-btn.danger {
-  border-color: #e5484d;
-  color: #ff8b8f;
+  border-color: var(--danger-strong);
+  color: var(--danger-text);
 }
 
 .admin-inline {
@@ -1283,6 +1371,49 @@ a:hover {
   color: var(--text-muted);
 }
 
+/* ── 主题切换 ───────────────────────────────────────────────── */
+
+.sidebar-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+.sidebar-footer-actions form {
+  flex: none;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+/* 管理后台侧栏里是竖排，按钮需要撑满一行 */
+.admin-nav-foot .theme-toggle {
+  width: 100%;
+  justify-content: center;
+}
+.theme-toggle-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.theme-toggle-text {
+  line-height: 1.2;
+}
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 8px;
@@ -1292,11 +1423,11 @@ a:hover {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1a1b1e;
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #141518;
+  background: var(--scrollbar-thumb-hover);
 }
 
 @media (max-width: 760px) {

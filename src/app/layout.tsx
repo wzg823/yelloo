@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from 'next'
+import { cookies } from 'next/headers'
 import './globals.css'
 import { getCurrentUser } from '@/lib/session'
 import { listChannels, type ChannelSummary } from '@/lib/queries'
 import { safeQuery } from '@/lib/safe-query'
 import { SessionProvider } from '@/lib/session-context'
+import { THEME_COOKIE, htmlThemeAttribute } from '@/lib/theme'
 import { AppShell } from '@/components/AppShell'
 import { CodeEnhancer } from '@/components/CodeEnhancer'
 
@@ -23,7 +25,13 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  themeColor: '#1a1b1e',
+  // 与两套配色对应：浏览器 UI（地址栏、状态栏）跟着系统走，
+  // 显式选了主题则由 <html data-theme> 决定实际配色
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#faf9f5' },
+    { media: '(prefers-color-scheme: dark)', color: '#1a1b1e' },
+  ],
+  colorScheme: 'light dark',
   width: 'device-width',
   initialScale: 1,
 }
@@ -49,8 +57,20 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     'listChannels',
   )
 
+  // ★ 主题必须在服务端读出来写进 <html>，否则首帧会闪白 ★
+  //
+  // cookies() 在构建期不可用（静态生成时），与 getCurrentUser 一样需要容错：
+  // 读不到就当"用户没选过"，让 CSS 按系统偏好走。
+  let themeAttr: 'light' | 'dark' | undefined
+  try {
+    const store = await cookies()
+    themeAttr = htmlThemeAttribute(store.get(THEME_COOKIE)?.value)
+  } catch {
+    themeAttr = undefined
+  }
+
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" data-theme={themeAttr}>
       <body>
         <SessionProvider
           user={
